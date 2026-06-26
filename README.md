@@ -69,8 +69,56 @@ imports and encodes. On Linux/KDE Wayland this depends on:
 - a real GPU render node (e.g. amdgpu) for VAAPI encoding;
 - a session where the Hermes process can access the user compositor environment.
 
-See the Hermes-KMS driver repository for module build, udev, and the
-zero-copy validation tooling.
+#### Installing the Hermes-KMS driver
+
+Hermes-KMS is an out-of-tree kernel module distributed via DKMS, so it rebuilds
+automatically for every kernel update (the same way `evdi-dkms` works). The
+source lives at <https://github.com/MrOz59/Hermes-KMS>.
+
+**Option A — DKMS from a clone** (any distro with `dkms` and kernel headers):
+
+```bash
+git clone https://github.com/MrOz59/Hermes-KMS.git
+cd Hermes-KMS
+sudo make dkms-install        # registers + builds + installs via DKMS
+sudo modprobe hermes_kms initial_enabled=1
+```
+
+The build auto-detects whether your kernel was built with clang (e.g. CachyOS)
+or gcc, so no extra flags are needed. To load it automatically on every boot,
+the repo ships drop-ins you can install:
+
+```bash
+sudo install -Dm644 packaging/modules-load.d/hermes-kms.conf /etc/modules-load.d/hermes-kms.conf
+sudo install -Dm644 packaging/modprobe.d/hermes-kms.conf /etc/modprobe.d/hermes-kms.conf
+```
+
+To remove it:
+
+```bash
+sudo make dkms-uninstall
+```
+
+**Option B — Arch/CachyOS package** (builds and installs via DKMS, with boot
+auto-load drop-ins included):
+
+```bash
+git clone https://github.com/MrOz59/Hermes-KMS.git
+cd Hermes-KMS
+makepkg -si
+```
+
+Verify the module is loaded and a Hermes render node exists:
+
+```bash
+lsmod | grep hermes_kms
+ls /dev/dri/by-path/ | grep hermes   # expect platform-hermes-kms-render -> ../renderD*
+```
+
+Do **not** install the driver's development seat-ignore udev rule for normal
+streaming — it stops KWin/GNOME from adopting the output. That rule is only for
+isolated `modetest` driver testing. See the driver repository for build internals
+and the zero-copy validation tooling.
 
 ### EVDI (supported alternative)
 
