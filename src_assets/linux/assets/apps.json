@@ -31,6 +31,16 @@
         "setsid steam steam://open/bigpicture"
       ],
       "image-path": "steam.png"
+    },
+    {
+      "name": "Gamescope Steam Session",
+      "image-path": "steam.png",
+      "virtual-display": true,
+      "auto-detach": false,
+      "wait-all": true,
+      "exit-timeout": 5,
+      "scale-factor": 100,
+      "cmd": "apollo-gamescope-launch"
     }
   ]
 }

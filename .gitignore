@@ -62,3 +62,7 @@ cmake-build-*/
 pkg/
 pkg-output/
 *.pkg.tar.zst
+apollo-linux-build
+
+docs/codex/*
+jsson-lsp.log

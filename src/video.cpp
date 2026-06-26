@@ -821,9 +821,17 @@ namespace video {
         {"rc"s, &config::video.amd.amd_rc_h264},
         {"usage"s, &config::video.amd.amd_usage_h264},
         {"vbaq"s, &config::video.amd.amd_vbaq},
+        {"coder"s, &config::video.amd.amd_coder},
         {"enforce_hrd"s, &config::video.amd.amd_enforce_hrd},
       },
-      {},  // SDR-specific options
+      {
+        // SDR-specific options
+        {"profile"s, [](const config_t &cfg) {
+           if (cfg.profile == 66) return "baseline"s;
+           if (cfg.profile == 77) return "main"s;
+           return "high"s;
+         }},
+      },
       {},  // HDR-specific options
       {},  // YUV444 SDR-specific options
       {},  // YUV444 HDR-specific options
@@ -961,8 +969,7 @@ namespace video {
       {},  // Fallback options
       "h264_vaapi"s,
     },
-    // RC buffer size will be set in platform code if supported
-    LIMITED_GOP_SIZE | PARALLEL_ENCODING | NO_RC_BUF_LIMIT
+    PARALLEL_ENCODING
   };
 #endif
 
@@ -1735,6 +1742,9 @@ namespace video {
       for (auto &option : (config.dynamicRange ? video_format.hdr_options : video_format.sdr_options)) {
         handle_option(option);
       }
+      if (config::video.vaapi.quality >= 0 && encoder.name == "vaapi") {
+        av_dict_set_int(&options, "quality", config::video.vaapi.quality, 0);
+      }
       if (config.chromaSamplingType == 1) {
         for (auto &option : (config.dynamicRange ? video_format.hdr444_options : video_format.sdr444_options)) {
           handle_option(option);
@@ -1977,6 +1987,7 @@ namespace video {
     }
 
     std::chrono::steady_clock::time_point encode_frame_timestamp;
+    bool missing_frame_timestamp_warning_logged = false;
 
     while (true) {
       // Break out of the encoding loop if any of the following are true:
@@ -2014,6 +2025,10 @@ namespace video {
         if (auto img = images->pop(max_frametime)) {
           frame_timestamp = img->frame_timestamp;
           if (!frame_timestamp) {
+            if (!missing_frame_timestamp_warning_logged) {
+              BOOST_LOG(warning) << "Encoder received image without frame timestamp; substituting steady_clock::now()"sv;
+              missing_frame_timestamp_warning_logged = true;
+            }
             frame_timestamp = std::chrono::steady_clock::now();
           }
 

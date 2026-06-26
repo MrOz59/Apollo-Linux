@@ -8,6 +8,7 @@
  #define BOOST_PROCESS_VERSION 1
 #endif
 // standard includes
+#include <algorithm>
 #include <filesystem>
 #include <string>
 #include <thread>
@@ -18,6 +19,7 @@
 #include <boost/crc.hpp>
 #include <boost/filesystem.hpp>
 #include <boost/program_options/parsers.hpp>
+#include <boost/process/v1/search_path.hpp>
 #include <boost/property_tree/json_parser.hpp>
 #include <boost/property_tree/ptree.hpp>
 #include <openssl/evp.h>
@@ -200,6 +202,8 @@ namespace proc {
     int scale_factor = launch_session->scale_factor;
     if (_app.scale_factor != 100) {
       scale_factor = _app.scale_factor;
+    } else if (scale_factor == 100 && config::video.default_scale_factor != 100) {
+      scale_factor = config::video.default_scale_factor;
     }
 
     if (scale_factor != 100) {
@@ -322,6 +326,7 @@ namespace proc {
 
         if (!vdisplayName.empty()) {
           BOOST_LOG(info) << "Virtual Display created at " << vdisplayName;
+          bool virtual_display_ready_for_capture = true;
 
           // Don't change display settings when no params are given
           if (launch_session->width && launch_session->height && launch_session->fps) {
@@ -333,29 +338,61 @@ namespace proc {
 #endif
           }
 
+#ifndef _WIN32
+          const bool hermes_kms_display = VDISPLAY::isHermesKmsDisplay(vdisplayName);
+          virtual_display_ready_for_capture = VDISPLAY::activateVirtualDisplayOutput(vdisplayName);
+          if (!virtual_display_ready_for_capture) {
+            const char *backend_label = hermes_kms_display ? "Hermes-KMS" : "EVDI";
+            if (hermes_kms_display) {
+              BOOST_LOG(error) << "The compositor did not activate the Hermes-KMS output. "
+                               << "Keeping capture pinned to HERMES-1 so the session fails explicitly instead of streaming a physical display.";
+            } else {
+              BOOST_LOG(warning) << "The compositor did not activate the " << backend_label << " output. "
+                                 << "Falling back to the configured physical display to avoid a black stream.";
+            }
+          }
+#endif
+
           // Check the ISOLATED DISPLAY configuration setting and rearrange the displays
-          if (config::video.isolated_virtual_display_option == true) {
+          if (virtual_display_ready_for_capture && config::video.isolated_virtual_display_option == true) {
             // Apply the isolated display settings
 #ifdef _WIN32
             VDISPLAY::changeDisplaySettings2(vdisplayName.c_str(), render_width, render_height, target_fps, true);
 #else
             VDISPLAY::changeDisplaySettings2(vdisplayName.c_str(), render_width, render_height, target_fps, true);
+            if (!VDISPLAY::enableExclusiveVirtualDisplay(vdisplayName)) {
+              BOOST_LOG(warning) << "Virtual display is active, but exclusive mode could not disable physical outputs.";
+            }
 #endif
           }
 
-          // Set virtual_display to true when everything went fine
-          this->virtual_display = true;
+          // Only route capture to the virtual output after the compositor has enabled it.
+          // Some Wayland compositors expose the DRM connector but cannot add it
+          // to their output layout; encoding that untouched virtual buffer yields
+          // a black stream while audio continues normally.
+          this->virtual_display = virtual_display_ready_for_capture;
 #ifdef _WIN32
           this->display_name = platf::to_utf8(vdisplayName);
 #else
-          this->display_name = vdisplayName;
+          if (hermes_kms_display && !virtual_display_ready_for_capture) {
+            this->virtual_display = true;
+            this->display_name = vdisplayName;
+            VDISPLAY::setVirtualDisplayCaptureFallbackActive(false);
+          } else {
+            VDISPLAY::setVirtualDisplayCaptureFallbackActive(!virtual_display_ready_for_capture);
+            if (virtual_display_ready_for_capture) {
+              this->display_name = vdisplayName;
+            }
+          }
 #endif
 
           // When using virtual display, we don't care which display user configured to use.
           // So we always set output_name to the newly created virtual display as a workaround for
           // empty name when probing graphics cards.
 
-          config::video.output_name = display_device::map_display_name(this->display_name);
+          if (virtual_display_ready_for_capture || this->virtual_display) {
+            config::video.output_name = display_device::map_display_name(this->display_name);
+          }
         } else {
           BOOST_LOG(warning) << "Virtual Display creation failed, or cannot get created display name in time!";
         }
@@ -418,6 +455,10 @@ namespace proc {
     _env["APOLLO_CLIENT_GCMAP"] = std::to_string(launch_session->gcmap);
     _env["APOLLO_CLIENT_HOST_AUDIO"] = launch_session->host_audio ? "true" : "false";
     _env["APOLLO_CLIENT_ENABLE_SOPS"] = launch_session->enable_sops ? "true" : "false";
+    if (!launch_session->enable_hdr) {
+      _env["DXVK_HDR"] = "0";
+      _env["PROTON_ENABLE_HDR"] = "0";
+    }
 
     int channelCount = launch_session->surround_info & 65535;
     switch (channelCount) {
@@ -510,10 +551,33 @@ namespace proc {
       boost::filesystem::path working_dir = _app.working_dir.empty() ?
                                               find_working_directory(_app.cmd, _env) :
                                               boost::filesystem::path(_app.working_dir);
-      BOOST_LOG(info) << "Executing: ["sv << _app.cmd << "] in ["sv << working_dir << ']';
-      _process = platf::run_command(_app.elevated, true, _app.cmd, working_dir, _env, _pipe.get(), ec, &_process_group);
+      std::string launch_command = _app.cmd;
+      if (launch_session->launch_mode == "gamescope") {
+#ifdef _WIN32
+        BOOST_LOG(warning) << "Gamescope launch mode is only available on Linux; using the configured application command";
+#else
+        if (boost::process::v1::search_path("gamescope").empty()) {
+          BOOST_LOG(error) << "Gamescope launch mode was requested, but gamescope is not available in PATH";
+          return -1;
+        }
+
+        const int gamescope_fps = std::max(1, (launch_session->fps ? launch_session->fps : 60000) / 1000);
+        // This path is only used when a client explicitly requested Gamescope.
+        // The primary session path above has already created/activated EVDI,
+        // so Gamescope is nested on the virtual display instead of replacing it.
+        launch_command = std::format("gamescope --backend=wayland -W {} -H {} -r {} -o {} -f -e -F fsr --fsr-sharpness 4 -- {}",
+                                     launch_session->width,
+                                     launch_session->height,
+                                     gamescope_fps,
+                                     gamescope_fps,
+                                     _app.cmd);
+#endif
+      }
+
+      BOOST_LOG(info) << "Executing: ["sv << launch_command << "] in ["sv << working_dir << ']';
+      _process = platf::run_command(_app.elevated, true, launch_command, working_dir, _env, _pipe.get(), ec, &_process_group);
       if (ec) {
-        BOOST_LOG(warning) << "Couldn't run ["sv << _app.cmd << "]: System: "sv << ec.message();
+        BOOST_LOG(warning) << "Couldn't run ["sv << launch_command << "]: System: "sv << ec.message();
         return -1;
       }
     }
@@ -786,6 +850,11 @@ namespace proc {
 
     bool used_virtual_display = vDisplayDriverStatus == VDISPLAY::DRIVER_STATUS::OK && _launch_session && _launch_session->virtual_display;
     if (used_virtual_display) {
+#ifndef _WIN32
+      if (config::video.isolated_virtual_display_option) {
+        VDISPLAY::restoreExclusiveVirtualDisplay();
+      }
+#endif
       if (VDISPLAY::removeVirtualDisplay(_launch_session->display_guid)) {
         BOOST_LOG(info) << "Virtual Display removed successfully";
       } else if (this->virtual_display) {

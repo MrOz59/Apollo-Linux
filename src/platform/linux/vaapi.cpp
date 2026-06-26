@@ -268,8 +268,15 @@ namespace va {
       // When we have to resort to the default 1 second VBV for encoding quality reasons,
       // we stick to CBR in order to avoid encoding huge frames after bitrate undershoots
       // leave headroom available in the RC window.
+      const bool amd_or_mesa_vaapi = vendor && (
+        strstr(vendor, "AMD") ||
+        strstr(vendor, "Mesa") ||
+        strstr(vendor, "RADV") ||
+        strstr(vendor, "radeonsi")
+      );
       if (config::video.vaapi.strict_rc_buffer ||
           (vendor && strstr(vendor, "Intel")) ||
+          amd_or_mesa_vaapi ||
           ctx->codec_id == AV_CODEC_ID_AV1) {
         ctx->rc_buffer_size = ctx->bit_rate * ctx->framerate.den / ctx->framerate.num;
 
@@ -287,7 +294,16 @@ namespace va {
         BOOST_LOG(warning) << "Using CQP rate control"sv;
         av_dict_set_int(options, "qp", config::video.qp, 0);
       } else {
-        BOOST_LOG(info) << "Using default rate control"sv;
+        // For remaining VAAPI encoders (typically AMD H.264/HEVC), explicitly
+        // select a rate control mode. The VBV buffer size is already set by
+        // the common encoder code in video.cpp.
+        if (rc_attr.value & VA_RC_CBR) {
+          BOOST_LOG(info) << "Using CBR rate control"sv;
+          av_dict_set(options, "rc_mode", "CBR", 0);
+        } else if (rc_attr.value & VA_RC_VBR) {
+          BOOST_LOG(info) << "Using VBR rate control"sv;
+          av_dict_set(options, "rc_mode", "VBR", 0);
+        }
       }
     }
 

@@ -878,4 +878,7 @@ namespace platf {
   bool
   set_clipboard(const std::string& content);
 
+  bool
+  clipboard_available();
+
 }  // namespace platf

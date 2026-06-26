@@ -3,7 +3,14 @@
  * @brief Definitions for Wayland capture.
  */
 // standard includes
+#include <algorithm>
 #include <cstdlib>
+#include <map>
+#include <memory>
+#include <string>
+#include <thread>
+#include <utility>
+#include <vector>
 
 // platform includes
 #include <drm_fourcc.h>
@@ -106,6 +113,338 @@ namespace wl {
   wl_registry *display_t::registry() {
     return wl_display_get_registry(display_internal.get());
   }
+
+  namespace {
+    struct output_mode_t {
+      zwlr_output_mode_v1 *proxy {nullptr};
+      int width {0};
+      int height {0};
+      int refresh_rate {0};
+      bool preferred {false};
+    };
+
+    struct output_head_t {
+      zwlr_output_head_v1 *proxy {nullptr};
+      std::string name;
+      std::string description;
+      bool enabled {false};
+      output_mode_t *current_mode {nullptr};
+      int x {0};
+      int y {0};
+      int transform {WL_OUTPUT_TRANSFORM_NORMAL};
+      wl_fixed_t scale {wl_fixed_from_int(1)};
+      std::vector<std::unique_ptr<output_mode_t>> modes;
+    };
+
+    struct saved_output_t {
+      bool enabled {false};
+      int width {0};
+      int height {0};
+      int refresh_rate {0};
+      int x {0};
+      int y {0};
+      int transform {WL_OUTPUT_TRANSFORM_NORMAL};
+      wl_fixed_t scale {wl_fixed_from_int(1)};
+    };
+
+    std::map<std::string, saved_output_t> saved_output_layout;
+    bool saved_output_layout_available {false};
+
+    struct output_control_t {
+      display_t display;
+      zwlr_output_manager_v1 *manager {nullptr};
+      std::vector<std::unique_ptr<output_head_t>> heads;
+      uint32_t serial {0};
+      bool ready {false};
+      bool manager_finished {false};
+      int apply_result {0};
+
+      ~output_control_t() {
+        for (auto &head : heads) {
+          for (auto &mode : head->modes) {
+            if (mode->proxy) {
+              zwlr_output_mode_v1_destroy(mode->proxy);
+            }
+          }
+          if (head->proxy) {
+            zwlr_output_head_v1_destroy(head->proxy);
+          }
+        }
+        if (manager && !manager_finished) {
+          zwlr_output_manager_v1_destroy(manager);
+        }
+      }
+
+      bool init() {
+        if (display.init()) {
+          return false;
+        }
+
+        static const wl_registry_listener registry_listener {
+          .global = [](void *data, wl_registry *registry, uint32_t id, const char *interface, uint32_t version) {
+            auto *control = static_cast<output_control_t *>(data);
+            if (std::strcmp(interface, zwlr_output_manager_v1_interface.name) == 0) {
+              const auto bind_version = std::min(version, 4u);
+              control->manager = static_cast<zwlr_output_manager_v1 *>(
+                wl_registry_bind(registry, id, &zwlr_output_manager_v1_interface, bind_version)
+              );
+              zwlr_output_manager_v1_add_listener(control->manager, &manager_listener, control);
+            }
+          },
+          .global_remove = [](void *, wl_registry *, uint32_t) {},
+        };
+
+        wl_registry_add_listener(display.registry(), &registry_listener, this);
+        display.roundtrip();
+        return manager != nullptr;
+      }
+
+      bool collect() {
+        if (!manager) {
+          return false;
+        }
+        display.roundtrip();
+        return ready && !manager_finished && !heads.empty();
+      }
+
+      output_head_t *find_head(const std::string &name) {
+        const auto it = std::find_if(heads.begin(), heads.end(), [&](const auto &head) {
+          return head->name == name;
+        });
+        return it == heads.end() ? nullptr : it->get();
+      }
+
+      static void mode_size(void *data, zwlr_output_mode_v1 *, int32_t width, int32_t height) {
+        auto *mode = static_cast<output_mode_t *>(data);
+        mode->width = width;
+        mode->height = height;
+      }
+
+      static void mode_refresh(void *data, zwlr_output_mode_v1 *, int32_t refresh_rate) {
+        static_cast<output_mode_t *>(data)->refresh_rate = refresh_rate;
+      }
+
+      static void mode_preferred(void *data, zwlr_output_mode_v1 *) {
+        static_cast<output_mode_t *>(data)->preferred = true;
+      }
+
+      static void mode_finished(void *, zwlr_output_mode_v1 *) {}
+
+      static void head_name(void *data, zwlr_output_head_v1 *, const char *name) {
+        static_cast<output_head_t *>(data)->name = name;
+      }
+
+      static void head_description(void *data, zwlr_output_head_v1 *, const char *description) {
+        static_cast<output_head_t *>(data)->description = description;
+      }
+
+      static void head_physical_size(void *, zwlr_output_head_v1 *, int32_t, int32_t) {}
+
+      static void head_mode(void *data, zwlr_output_head_v1 *, zwlr_output_mode_v1 *proxy) {
+        auto *head = static_cast<output_head_t *>(data);
+        auto mode = std::make_unique<output_mode_t>();
+        mode->proxy = proxy;
+        zwlr_output_mode_v1_add_listener(proxy, &mode_listener, mode.get());
+        head->modes.emplace_back(std::move(mode));
+      }
+
+      static void head_enabled(void *data, zwlr_output_head_v1 *, int32_t enabled) {
+        static_cast<output_head_t *>(data)->enabled = enabled != 0;
+      }
+
+      static void head_current_mode(void *data, zwlr_output_head_v1 *, zwlr_output_mode_v1 *proxy) {
+        auto *head = static_cast<output_head_t *>(data);
+        const auto it = std::find_if(head->modes.begin(), head->modes.end(), [&](const auto &mode) {
+          return mode->proxy == proxy;
+        });
+        head->current_mode = it == head->modes.end() ? nullptr : it->get();
+      }
+
+      static void head_position(void *data, zwlr_output_head_v1 *, int32_t x, int32_t y) {
+        auto *head = static_cast<output_head_t *>(data);
+        head->x = x;
+        head->y = y;
+      }
+
+      static void head_transform(void *data, zwlr_output_head_v1 *, int32_t transform) {
+        static_cast<output_head_t *>(data)->transform = transform;
+      }
+
+      static void head_scale(void *data, zwlr_output_head_v1 *, wl_fixed_t scale) {
+        static_cast<output_head_t *>(data)->scale = scale;
+      }
+
+      static void head_finished(void *, zwlr_output_head_v1 *) {}
+      static void head_string(void *, zwlr_output_head_v1 *, const char *) {}
+      static void head_adaptive_sync(void *, zwlr_output_head_v1 *, uint32_t) {}
+
+      static void manager_head(void *data, zwlr_output_manager_v1 *, zwlr_output_head_v1 *proxy) {
+        auto *control = static_cast<output_control_t *>(data);
+        auto head = std::make_unique<output_head_t>();
+        head->proxy = proxy;
+        zwlr_output_head_v1_add_listener(proxy, &head_listener, head.get());
+        control->heads.emplace_back(std::move(head));
+      }
+
+      static void manager_done(void *data, zwlr_output_manager_v1 *, uint32_t serial) {
+        auto *control = static_cast<output_control_t *>(data);
+        control->serial = serial;
+        control->ready = true;
+      }
+
+      static void manager_protocol_finished(void *data, zwlr_output_manager_v1 *) {
+        static_cast<output_control_t *>(data)->manager_finished = true;
+      }
+
+      static void configuration_succeeded(void *data, zwlr_output_configuration_v1 *) {
+        static_cast<output_control_t *>(data)->apply_result = 1;
+      }
+
+      static void configuration_failed(void *data, zwlr_output_configuration_v1 *) {
+        static_cast<output_control_t *>(data)->apply_result = -1;
+      }
+
+      static void configuration_cancelled(void *data, zwlr_output_configuration_v1 *) {
+        static_cast<output_control_t *>(data)->apply_result = -1;
+      }
+
+      static inline const zwlr_output_mode_v1_listener mode_listener {
+        .size = mode_size,
+        .refresh = mode_refresh,
+        .preferred = mode_preferred,
+        .finished = mode_finished,
+      };
+
+      static inline const zwlr_output_head_v1_listener head_listener {
+        .name = head_name,
+        .description = head_description,
+        .physical_size = head_physical_size,
+        .mode = head_mode,
+        .enabled = head_enabled,
+        .current_mode = head_current_mode,
+        .position = head_position,
+        .transform = head_transform,
+        .scale = head_scale,
+        .finished = head_finished,
+        .make = head_string,
+        .model = head_string,
+        .serial_number = head_string,
+        .adaptive_sync = head_adaptive_sync,
+      };
+
+      static inline const zwlr_output_manager_v1_listener manager_listener {
+        .head = manager_head,
+        .done = manager_done,
+        .finished = manager_protocol_finished,
+      };
+
+      static inline const zwlr_output_configuration_v1_listener configuration_listener {
+        .succeeded = configuration_succeeded,
+        .failed = configuration_failed,
+        .cancelled = configuration_cancelled,
+      };
+    };
+
+    output_mode_t *preferred_or_current_mode(output_head_t &head) {
+      if (head.current_mode) {
+        return head.current_mode;
+      }
+      const auto it = std::find_if(head.modes.begin(), head.modes.end(), [](const auto &mode) {
+        return mode->preferred;
+      });
+      return it == head.modes.end() ? (head.modes.empty() ? nullptr : head.modes.front().get()) : it->get();
+    }
+
+    output_mode_t *matching_mode(output_head_t &head, int width, int height, int refresh_rate) {
+      const auto it = std::find_if(head.modes.begin(), head.modes.end(), [&](const auto &mode) {
+        return mode->width == width && mode->height == height &&
+               (refresh_rate <= 0 || mode->refresh_rate == 0 || std::abs(mode->refresh_rate - refresh_rate) <= 1000);
+      });
+      return it == head.modes.end() ? nullptr : it->get();
+    }
+
+    bool apply_configuration(output_control_t &control, output_head_t &virtual_head, int width, int height, int refresh_rate, bool exclusive, bool restore) {
+      auto *configuration = zwlr_output_manager_v1_create_configuration(control.manager, control.serial);
+      if (!configuration) {
+        return false;
+      }
+
+      bool valid = true;
+      int right_edge = 0;
+      for (const auto &head : control.heads) {
+        if (head->enabled && head->current_mode) {
+          right_edge = std::max(right_edge, head->x + head->current_mode->width);
+        }
+      }
+
+      for (const auto &head : control.heads) {
+        bool enable = head->enabled;
+        output_mode_t *mode = preferred_or_current_mode(*head);
+        int x = head->x;
+        int y = head->y;
+        int transform = head->transform;
+        wl_fixed_t scale = head->scale;
+        bool custom_mode = false;
+
+        if (restore) {
+          const auto saved = saved_output_layout.find(head->name);
+          if (saved != saved_output_layout.end()) {
+            enable = saved->second.enabled;
+            mode = matching_mode(*head, saved->second.width, saved->second.height, saved->second.refresh_rate);
+            x = saved->second.x;
+            y = saved->second.y;
+            transform = saved->second.transform;
+            scale = saved->second.scale;
+          }
+        } else if (head.get() == &virtual_head) {
+          enable = true;
+          mode = matching_mode(*head, width, height, refresh_rate);
+          custom_mode = mode == nullptr;
+          x = exclusive ? 0 : right_edge;
+          y = 0;
+          transform = WL_OUTPUT_TRANSFORM_NORMAL;
+          scale = wl_fixed_from_int(1);
+        } else if (exclusive) {
+          enable = false;
+        }
+
+        if (!enable) {
+          zwlr_output_configuration_v1_disable_head(configuration, head->proxy);
+          continue;
+        }
+
+        if (!mode && !custom_mode) {
+          BOOST_LOG(error) << "Wayland output "sv << head->name << " has no usable mode"sv;
+          valid = false;
+          break;
+        }
+
+        auto *configured_head = zwlr_output_configuration_v1_enable_head(configuration, head->proxy);
+        if (custom_mode) {
+          zwlr_output_configuration_head_v1_set_custom_mode(configured_head, width, height, refresh_rate);
+        } else {
+          zwlr_output_configuration_head_v1_set_mode(configured_head, mode->proxy);
+        }
+        zwlr_output_configuration_head_v1_set_position(configured_head, x, y);
+        zwlr_output_configuration_head_v1_set_transform(configured_head, transform);
+        zwlr_output_configuration_head_v1_set_scale(configured_head, scale);
+      }
+
+      if (!valid) {
+        zwlr_output_configuration_v1_destroy(configuration);
+        return false;
+      }
+
+      control.apply_result = 0;
+      zwlr_output_configuration_v1_add_listener(configuration, &output_control_t::configuration_listener, &control);
+      zwlr_output_configuration_v1_apply(configuration);
+      for (int attempt = 0; attempt < 20 && control.apply_result == 0; ++attempt) {
+        control.display.dispatch(100ms);
+      }
+      zwlr_output_configuration_v1_destroy(configuration);
+      return control.apply_result == 1;
+    }
+  }  // namespace
 
   inline monitor_t::monitor_t(wl_output *output):
       output {output},
@@ -557,6 +896,89 @@ namespace wl {
     display.roundtrip();
 
     return std::move(interface.monitors);
+  }
+
+  bool configure_virtual_output(const std::string &output_name, int width, int height, int refresh_rate, bool exclusive) {
+    for (int attempt = 0; attempt < 5; ++attempt) {
+      output_control_t control;
+      if (!control.init()) {
+        BOOST_LOG(warning) << "Wayland compositor does not expose wlr-output-management; cannot activate virtual output "sv << output_name;
+        return false;
+      }
+
+      if (!control.collect()) {
+        BOOST_LOG(warning) << "Wayland output-management returned no complete output layout."sv;
+        return false;
+      }
+
+      auto *virtual_head = control.find_head(output_name);
+      if (!virtual_head) {
+        // Virtual DRM connectors are published asynchronously. Give the compositor
+        // a short window to process the hotplug before declaring it unavailable.
+        std::this_thread::sleep_for(100ms);
+        continue;
+      }
+
+      std::map<std::string, saved_output_t> previous_layout;
+      if (exclusive) {
+        for (const auto &head : control.heads) {
+          if (head.get() == virtual_head) {
+            continue;
+          }
+          const auto *mode = preferred_or_current_mode(*head);
+          previous_layout[head->name] = {
+            .enabled = head->enabled,
+            .width = mode ? mode->width : 0,
+            .height = mode ? mode->height : 0,
+            .refresh_rate = mode ? mode->refresh_rate : 0,
+            .x = head->x,
+            .y = head->y,
+            .transform = head->transform,
+            .scale = head->scale,
+          };
+        }
+      }
+
+      const bool applied = apply_configuration(control, *virtual_head, width, height, refresh_rate, exclusive, false);
+      if (applied && exclusive) {
+        saved_output_layout = std::move(previous_layout);
+        saved_output_layout_available = true;
+      }
+      if (!applied) {
+        BOOST_LOG(warning) << "Wayland compositor rejected the virtual output layout for "sv << output_name;
+      }
+      return applied;
+    }
+
+    BOOST_LOG(warning) << "Virtual connector "sv << output_name << " did not appear in the Wayland output layout."sv;
+    return false;
+  }
+
+  bool restore_virtual_output_layout() {
+    if (!saved_output_layout_available) {
+      return true;
+    }
+
+    output_control_t control;
+    if (!control.init() || !control.collect() || control.heads.empty()) {
+      BOOST_LOG(warning) << "Cannot restore the Wayland physical output layout."sv;
+      return false;
+    }
+
+    const bool restored = apply_configuration(control, *control.heads.front(), 0, 0, 0, false, true);
+    if (restored) {
+      saved_output_layout.clear();
+      saved_output_layout_available = false;
+      BOOST_LOG(info) << "Restored Wayland physical output layout."sv;
+    } else {
+      BOOST_LOG(warning) << "Wayland compositor rejected restoration of the physical output layout."sv;
+    }
+    return restored;
+  }
+
+  bool output_management_supported() {
+    output_control_t control;
+    return control.init() && control.collect();
   }
 
   static bool validate() {

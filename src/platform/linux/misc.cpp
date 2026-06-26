@@ -11,6 +11,9 @@
 // standard includes
 #include <fstream>
 #include <iostream>
+#include <cstdio>
+#include <cerrno>
+#include <csignal>
 
 // platform includes
 #include <arpa/inet.h>
@@ -29,8 +32,10 @@
 #include <boost/process/v1/group.hpp>
 #include <boost/process/v1/handles.hpp>
 #include <boost/process/v1/io.hpp>
+#include <boost/process/v1/search_path.hpp>
 #include <boost/process/v1/start_dir.hpp>
 #include <fcntl.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 // local includes
@@ -41,6 +46,7 @@
 #include "src/logging.h"
 #include "src/platform/common.h"
 #include "vaapi.h"
+#include "virtual_display.h"
 
 #include <linux/rtnetlink.h>
 
@@ -919,6 +925,17 @@ std::string get_local_ip_for_gateway() {
 #endif
 
   std::vector<std::string> display_names(mem_type_e hwdevice_type) {
+#ifdef SUNSHINE_BUILD_DRM
+    // An EVDI display is a real DRM output, but its name is intentionally not
+    // part of the generic monitor-index list. Keep the stable virtual name so
+    // a capture reinitialization cannot switch the stream back to a physical
+    // output (or a lower-latency-looking but wrong Wayland/NvFBC source).
+    auto virtual_displays = VDISPLAY::matchDisplay("VIRTUAL-");
+    if (!virtual_displays.empty()) {
+      return virtual_displays;
+    }
+#endif
+
 #ifdef SUNSHINE_BUILD_CUDA
     // display using NvFBC only supports mem_type_e::cuda
     if (sources[source::NVFBC] && hwdevice_type == mem_type_e::cuda) {
@@ -953,6 +970,17 @@ std::string get_local_ip_for_gateway() {
   }
 
   std::shared_ptr<display_t> display(mem_type_e hwdevice_type, const std::string &display_name, const video::config_t &config) {
+#ifdef SUNSHINE_BUILD_DRM
+    if (VDISPLAY::isHermesKmsDisplay(display_name)) {
+      BOOST_LOG(info) << "Screencasting Hermes-KMS virtual display with KMS"sv;
+      return kms_display(hwdevice_type, display_name, config);
+    }
+    if (VDISPLAY::isEvdiDisplay(display_name)) {
+      BOOST_LOG(info) << "Screencasting EVDI virtual display with KMS"sv;
+      return kms_display(hwdevice_type, display_name, config);
+    }
+#endif
+
 #ifdef SUNSHINE_BUILD_CUDA
     if (sources[source::NVFBC] && hwdevice_type == mem_type_e::cuda) {
       BOOST_LOG(info) << "Screencasting with NvFBC"sv;
@@ -1065,13 +1093,121 @@ std::string get_local_ip_for_gateway() {
 
   std::string
   get_clipboard() {
-    // Placeholder
-    return "";
+    if (!clipboard_available()) {
+      return "";
+    }
+
+    const char *command = window_system == window_system_e::WAYLAND ?
+                            "wl-paste --no-newline --type text/plain" :
+                            "xclip -selection clipboard -out";
+    FILE *pipe = popen(command, "r");
+    if (pipe == nullptr) {
+      BOOST_LOG(warning) << "Unable to read the clipboard";
+      return "";
+    }
+
+    constexpr size_t max_clipboard_bytes = 64 * 1024;
+    std::string content;
+    char buffer[4096];
+    while (const size_t bytes_read = fread(buffer, 1, sizeof(buffer), pipe)) {
+      if (content.size() + bytes_read > max_clipboard_bytes) {
+        BOOST_LOG(warning) << "Clipboard exceeds the 64 KiB Hestia limit";
+        pclose(pipe);
+        return "";
+      }
+      content.append(buffer, bytes_read);
+    }
+
+    if (pclose(pipe) != 0) {
+      BOOST_LOG(warning) << "Unable to read the clipboard";
+      return "";
+    }
+
+    return content;
   }
 
   bool
   set_clipboard(const std::string& content) {
-    // Placeholder
+    if (!clipboard_available() || content.size() > 64 * 1024 || content.find('\0') != std::string::npos) {
+      return false;
+    }
+
+    if (window_system == window_system_e::WAYLAND) {
+      FILE *pipe = popen("wl-copy --type text/plain", "w");
+      if (pipe == nullptr) {
+        BOOST_LOG(warning) << "Unable to write the Wayland clipboard";
+        return false;
+      }
+
+      const bool wrote_all = fwrite(content.data(), 1, content.size(), pipe) == content.size();
+      const int close_status = pclose(pipe);
+      const bool success = wrote_all && close_status == 0;
+      if (!success) {
+        BOOST_LOG(warning) << "Unable to write the Wayland clipboard";
+      }
+      return success;
+    }
+
+    int input_pipe[2];
+    if (pipe(input_pipe) != 0) {
+      BOOST_LOG(warning) << "Unable to create X11 clipboard pipe";
+      return false;
+    }
+
+    const pid_t child = fork();
+    if (child == 0) {
+      const pid_t owner = fork();
+      if (owner == 0) {
+        dup2(input_pipe[0], STDIN_FILENO);
+        close(input_pipe[0]);
+        close(input_pipe[1]);
+        execlp("xclip", "xclip", "-selection", "clipboard", "-in", nullptr);
+        _exit(127);
+      }
+      _exit(owner < 0 ? 1 : 0);
+    }
+
+    close(input_pipe[0]);
+    sigset_t sigpipe_mask;
+    sigemptyset(&sigpipe_mask);
+    sigaddset(&sigpipe_mask, SIGPIPE);
+    sigset_t previous_mask;
+    pthread_sigmask(SIG_BLOCK, &sigpipe_mask, &previous_mask);
+    size_t written = 0;
+    bool broken_pipe = false;
+    while (child > 0 && written < content.size()) {
+      const ssize_t result = write(input_pipe[1], content.data() + written, content.size() - written);
+      if (result <= 0) {
+        broken_pipe = result < 0 && errno == EPIPE;
+        break;
+      }
+      written += static_cast<size_t>(result);
+    }
+    if (broken_pipe) {
+      siginfo_t signal_info {};
+      sigwaitinfo(&sigpipe_mask, &signal_info);
+    }
+    pthread_sigmask(SIG_SETMASK, &previous_mask, nullptr);
+    const bool wrote_all = written == content.size();
+    close(input_pipe[1]);
+    if (child > 0) {
+      waitpid(child, nullptr, 0);
+    }
+    if (!wrote_all) {
+      BOOST_LOG(warning) << "Unable to write the X11 clipboard";
+    }
+    return wrote_all;
+  }
+
+  bool
+  clipboard_available() {
+    if (window_system == window_system_e::WAYLAND) {
+      return std::getenv("WAYLAND_DISPLAY") != nullptr &&
+             !bp::search_path("wl-copy").empty() && !bp::search_path("wl-paste").empty();
+    }
+    if (window_system == window_system_e::X11) {
+      return std::getenv("DISPLAY") != nullptr && !bp::search_path("xclip").empty();
+    }
     return false;
   }
 }  // namespace platf

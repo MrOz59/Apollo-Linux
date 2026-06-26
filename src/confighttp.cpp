@@ -15,11 +15,13 @@
 #include <thread>
 #include <numeric>
 #include <algorithm>
+#include <atomic>
 
 // lib includes
 #include <boost/algorithm/string.hpp>
 #include <boost/asio/ssl/context.hpp>
 #include <boost/filesystem.hpp>
+#include <boost/process/v1/search_path.hpp>
 #include <nlohmann/json.hpp>
 #include <Simple-Web-Server/crypto.hpp>
 #include <Simple-Web-Server/server_https.hpp>
@@ -49,7 +51,75 @@ using namespace std::literals;
 namespace confighttp {
   namespace fs = std::filesystem;
 
-  using https_server_t = SimpleWeb::Server<SimpleWeb::HTTPS>;
+  class HestiaHTTPSServer: public SimpleWeb::ServerBase<SimpleWeb::HTTPS> {
+  public:
+    HestiaHTTPSServer(const std::string &certification_file, const std::string &private_key_file):
+        ServerBase<SimpleWeb::HTTPS>::ServerBase(443),
+        context(boost::asio::ssl::context::tls_server) {
+      context.set_options(boost::asio::ssl::context::no_tlsv1);
+      context.set_options(boost::asio::ssl::context::no_tlsv1_1);
+      context.use_certificate_chain_file(certification_file);
+      context.use_private_key_file(private_key_file, boost::asio::ssl::context::pem);
+    }
+
+    std::function<void(std::shared_ptr<Request>, SSL *)> authenticate_client;
+
+  protected:
+    boost::asio::ssl::context context;
+
+    void after_bind() override {
+      // Request a client certificate but permit clients that do not have one so
+      // the read-only capabilities probe remains available before pairing.
+      context.set_verify_mode(boost::asio::ssl::verify_peer | boost::asio::ssl::verify_client_once);
+      context.set_verify_callback([](int, boost::asio::ssl::verify_context &) {
+        return true;
+      });
+    }
+
+    void accept() override {
+      auto connection = create_connection(*io_service, context);
+
+      acceptor->async_accept(connection->socket->lowest_layer(), [this, connection](const SimpleWeb::error_code &ec) {
+        auto lock = connection->handler_runner->continue_lock();
+        if (!lock) {
+          return;
+        }
+
+        if (ec != SimpleWeb::error::operation_aborted) {
+          this->accept();
+        }
+
+        auto session = std::make_shared<Session>(config.max_request_streambuf_size, connection);
+        if (!ec) {
+          boost::asio::ip::tcp::no_delay option(true);
+          SimpleWeb::error_code socket_error;
+          session->connection->socket->lowest_layer().set_option(option, socket_error);
+
+          session->connection->set_timeout(config.timeout_request);
+          session->connection->socket->async_handshake(boost::asio::ssl::stream_base::server, [this, session](const SimpleWeb::error_code &handshake_error) {
+            session->connection->cancel_timeout();
+            auto lock = session->connection->handler_runner->continue_lock();
+            if (!lock) {
+              return;
+            }
+
+            if (!handshake_error) {
+              if (authenticate_client) {
+                authenticate_client(session->request, session->connection->socket->native_handle());
+              }
+              this->read(session);
+            } else if (this->on_error) {
+              this->on_error(session->request, handshake_error);
+            }
+          });
+        } else if (this->on_error) {
+          this->on_error(session->request, ec);
+        }
+      });
+    }
+  };
+
+  using https_server_t = HestiaHTTPSServer;
   using args_t = SimpleWeb::CaseInsensitiveMultimap;
   using resp_https_t = std::shared_ptr<typename SimpleWeb::ServerBase<SimpleWeb::HTTPS>::Response>;
   using req_https_t = std::shared_ptr<typename SimpleWeb::ServerBase<SimpleWeb::HTTPS>::Request>;
@@ -63,6 +133,91 @@ namespace confighttp {
   // SESSION COOKIE
   std::string sessionCookie;
   static std::chrono::time_point<std::chrono::steady_clock> cookie_creation_time;
+
+  // 0 = idle, 1 = running, 2 = succeeded, 3 = failed/cancelled.
+  static std::atomic<int> evdi_install_status {0};
+  // 0 = idle, 1 = running, 2 = succeeded, 3 = failed/cancelled.
+  static std::atomic<int> clipboard_install_status {0};
+
+#ifdef __linux__
+  static const char *evdi_diagnostic_name(VDISPLAY::EVDI_DIAGNOSTIC diagnostic) {
+    switch (diagnostic) {
+      case VDISPLAY::EVDI_DIAGNOSTIC::READY:
+        return "ready";
+      case VDISPLAY::EVDI_DIAGNOSTIC::INITIAL_DEVICE_CONFIGURATION_REQUIRED:
+        return "setup_required";
+      case VDISPLAY::EVDI_DIAGNOSTIC::LIBRARY_MISSING:
+        return "library_missing";
+      case VDISPLAY::EVDI_DIAGNOSTIC::MODULE_NOT_INSTALLED:
+        return "module_not_installed";
+      case VDISPLAY::EVDI_DIAGNOSTIC::MODULE_NOT_LOADED:
+        return "module_not_loaded";
+      case VDISPLAY::EVDI_DIAGNOSTIC::DKMS_BUILD_FAILED:
+        return "dkms_build_failed";
+    }
+
+    return "module_not_loaded";
+  }
+
+  static nlohmann::json evdi_status_json() {
+    const auto status = VDISPLAY::getEvdiStatus();
+    nlohmann::json output {
+      {"diagnostic", evdi_diagnostic_name(status.diagnostic)},
+      {"libraryInstalled", status.library_installed},
+      {"libraryLoaded", status.library_loaded},
+      {"moduleLoaded", status.module_loaded},
+      {"moduleInstalled", status.module_installed},
+      {"deviceCount", status.device_count},
+      {"sessionType", status.session_type},
+      {"exclusiveLayoutSupported", status.exclusive_layout_supported},
+      {"outputLayoutBackend", status.output_layout_backend},
+      {"captureFallbackActive", status.capture_fallback_active},
+      {"libraryVersion", status.library_version},
+      {"runningKernel", status.running_kernel},
+      {"dkmsKernels", status.dkms_kernels},
+      {"activeDisplays", nlohmann::json::array()},
+    };
+
+    for (const auto &display : status.active_displays) {
+      output["activeDisplays"].push_back({
+        {"name", display.name},
+        {"deviceIndex", display.device_index},
+        {"drmCardIndex", display.drm_card_index},
+        {"width", display.width},
+        {"height", display.height},
+        {"fps", display.fps},
+        {"frameUpdates", display.frame_updates},
+        {"capturePath", "evdi_cpu_buffer"},
+        {"zeroCopyCapture", false},
+        {"hardwareEncodingAvailable", true},
+      });
+    }
+
+    return output;
+  }
+
+  static nlohmann::json clipboard_status_json() {
+    const bool wl_copy_available = !boost::process::v1::search_path("wl-copy").empty();
+    const bool wl_paste_available = !boost::process::v1::search_path("wl-paste").empty();
+    const bool xclip_available = !boost::process::v1::search_path("xclip").empty();
+    const bool wayland_display_available = std::getenv("WAYLAND_DISPLAY") != nullptr;
+    const bool x11_display_available = std::getenv("DISPLAY") != nullptr;
+    const char *diagnostic = platf::clipboard_available() ? "ready" :
+                             wayland_display_available && (!wl_copy_available || !wl_paste_available) ? "wl_clipboard_missing" :
+                             x11_display_available && !xclip_available ? "xclip_missing" :
+                             (!wayland_display_available && !x11_display_available) ? "desktop_session_unavailable" : "clipboard_unavailable";
+    return {
+      {"available", platf::clipboard_available()},
+      {"diagnostic", diagnostic},
+      {"wlCopyAvailable", wl_copy_available},
+      {"wlPasteAvailable", wl_paste_available},
+      {"xclipAvailable", xclip_available},
+      {"waylandDisplayAvailable", wayland_display_available},
+      {"x11DisplayAvailable", x11_display_available},
+      {"manualInstall", "Arch/CachyOS: sudo pacman -S --needed wl-clipboard xclip\nDebian/Ubuntu: sudo apt install wl-clipboard xclip\nFedora: sudo dnf install wl-clipboard xclip"},
+    };
+  }
+#endif
 
   /**
    * @brief Log the request details.
@@ -1005,14 +1160,526 @@ namespace confighttp {
     output_tree["status"] = true;
     output_tree["platform"] = SUNSHINE_PLATFORM;
     output_tree["version"] = PROJECT_VERSION;
-#ifdef _WIN32
     output_tree["vdisplayStatus"] = (int)proc::vDisplayDriverStatus;
+#ifdef __linux__
+    output_tree["evdiSetupRequired"] = VDISPLAY::needsInitialDeviceConfiguration();
+    output_tree["evdiInfo"] = evdi_status_json();
+    output_tree["evdiDiagnostic"] = output_tree["evdiInfo"]["diagnostic"];
+    output_tree["clipboardInfo"] = clipboard_status_json();
 #endif
     auto vars = config::parse_config(file_handler::read_file(config::sunshine.config_file.c_str()));
     for (auto &[name, value] : vars) {
       output_tree[name] = value;
     }
     send_response(response, output_tree);
+  }
+
+  /**
+   * @brief Return the static Hestia extension capabilities.
+   *
+   * This endpoint is deliberately read-only and unauthenticated so clients can
+   * detect Hermes before an extension authentication flow is available. It does
+   * not expose host state or permit any host-control operation.
+   */
+  void getHestiaCapabilities(resp_https_t response, req_https_t request) {
+    print_req(request);
+
+    const nlohmann::json capabilities {
+      {"ok", true},
+      {"server_name", "Hermes"},
+      {"base", "Hermes"},
+      {"hestia_protocol", 1},
+      {"min_client_protocol", 1},
+      {"max_client_protocol", 1},
+      {"server_version", "0.1.0-hermes"},
+      {"compatibility", {
+        {"gamestream", true},
+        {"moonlight", true},
+        {"sunshine", true},
+      }},
+      {"features", {
+        {"virtual_display", true},
+        {"virtual_display_backend", {"evdi", "hermes_kms"}},
+        {"kde_kscreen", true},
+        {"display_recovery", true},
+        {"client_resolution_matching", true},
+        {"client_fps_matching", true},
+        {"hdr_mode_control", true},
+        {"scale_factor", true},
+        {"gamescope_session", !boost::process::v1::search_path("gamescope").empty()},
+        {"server_commands", true},
+        {"clipboard_sync", platf::clipboard_available()},
+        {"permission_system", true},
+      }},
+      {"limits", {
+        {"max_width", 7680},
+        {"max_height", 4320},
+        {"max_fps", 120},
+        {"supported_fps", {30, 40, 45, 60, 90, 120}},
+        {"supported_codecs", {"h264", "hevc", "av1"}},
+      }},
+    };
+
+    send_response(response, capabilities);
+  }
+
+  void send_hestia_error(resp_https_t response, SimpleWeb::StatusCode status, const char *code, const char *message) {
+    const nlohmann::json output {
+      {"ok", false},
+      {"error", {
+        {"code", code},
+        {"message", message},
+      }},
+    };
+    const SimpleWeb::CaseInsensitiveMultimap headers {
+      {"Content-Type", "application/json"},
+      {"X-Frame-Options", "DENY"},
+      {"Content-Security-Policy", "frame-ancestors 'none';"},
+    };
+    response->write(status, output.dump(), headers);
+  }
+
+  bool authenticate_hestia_client(resp_https_t response, req_https_t request, crypto::PERM permission, const char *operation) {
+    auto client = std::static_pointer_cast<crypto::named_cert_t>(request->userp);
+    if (!client) {
+      send_hestia_error(response, SimpleWeb::StatusCode::client_error_unauthorized, "unauthorized", "A paired client certificate is required");
+      return false;
+    }
+
+    if (!(client->perm & permission)) {
+      BOOST_LOG(info) << "[HestiaAPI] permission denied for " << operation << " client=" << client->uuid;
+      send_hestia_error(response, SimpleWeb::StatusCode::client_error_forbidden, "permission_denied", "This client does not have the required permission");
+      return false;
+    }
+
+    return true;
+  }
+
+  std::shared_ptr<crypto::named_cert_t> authenticate_hestia_paired_client(resp_https_t response, req_https_t request) {
+    auto client = std::static_pointer_cast<crypto::named_cert_t>(request->userp);
+    if (!client) {
+      send_hestia_error(response, SimpleWeb::StatusCode::client_error_unauthorized, "unauthorized", "A paired client certificate is required");
+    }
+    return client;
+  }
+
+  bool hestia_has_exact_keys(const nlohmann::json &object, const std::set<std::string> &keys) {
+    if (!object.is_object() || object.size() != keys.size()) {
+      return false;
+    }
+
+    for (auto it = object.begin(); it != object.end(); ++it) {
+      if (!keys.contains(it.key())) {
+        return false;
+      }
+    }
+
+    return true;
+  }
+
+  bool hestia_is_positive_integer(const nlohmann::json &value) {
+    return value.is_number_integer() && value.get<int>() > 0;
+  }
+
+  bool hestia_is_one_of(const nlohmann::json &value, const std::set<std::string> &values) {
+    return value.is_string() && values.contains(value.get<std::string>());
+  }
+
+  bool validate_hestia_session_prepare(const nlohmann::json &request, std::string &error) {
+    static const std::set<std::string> request_keys {
+      "client", "stream", "virtual_display", "app",
+    };
+    static const std::set<std::string> client_keys {
+      "name", "version", "platform", "display_width", "display_height", "refresh_rate", "hdr",
+    };
+    static const std::set<std::string> stream_keys {
+      "requested_width", "requested_height", "requested_fps", "codec", "bitrate_kbps", "hdr_mode", "scale_factor",
+    };
+    static const std::set<std::string> virtual_display_keys {
+      "enabled", "backend", "desktop_integration", "recover_physical_monitor",
+    };
+    static const std::set<std::string> app_keys {
+      "id", "launch_mode",
+    };
+
+    if (!hestia_has_exact_keys(request, request_keys)) {
+      error = "Request must contain only client, stream, virtual_display, and app";
+      return false;
+    }
+
+    const auto &client = request["client"];
+    if (!hestia_has_exact_keys(client, client_keys) || !client["name"].is_string() ||
+        !client["version"].is_string() || !hestia_is_one_of(client["platform"], {"linux", "windows", "macos", "steamdeck", "unknown"}) ||
+        !hestia_is_positive_integer(client["display_width"]) || !hestia_is_positive_integer(client["display_height"]) ||
+        !hestia_is_positive_integer(client["refresh_rate"]) || !client["hdr"].is_boolean()) {
+      error = "Invalid client object";
+      return false;
+    }
+
+    const auto &stream = request["stream"];
+    if (!hestia_has_exact_keys(stream, stream_keys) || !hestia_is_positive_integer(stream["requested_width"]) ||
+        !hestia_is_positive_integer(stream["requested_height"]) || !hestia_is_positive_integer(stream["requested_fps"]) ||
+        !hestia_is_one_of(stream["codec"], {"h264", "hevc", "av1"}) || !hestia_is_positive_integer(stream["bitrate_kbps"]) ||
+        !hestia_is_one_of(stream["hdr_mode"], {"sdr", "hdr"}) || !hestia_is_positive_integer(stream["scale_factor"])) {
+      error = "Invalid stream object";
+      return false;
+    }
+
+    const int requested_width = stream["requested_width"].get<int>();
+    const int requested_height = stream["requested_height"].get<int>();
+    const int requested_fps = stream["requested_fps"].get<int>();
+    const int scale_factor = stream["scale_factor"].get<int>();
+    static const std::set<int> supported_fps {30, 40, 45, 60, 90, 120};
+    if (requested_width > 7680 || requested_height > 4320 || !supported_fps.contains(requested_fps) || scale_factor > 500) {
+      error = "Requested stream settings exceed host limits";
+      return false;
+    }
+
+    const auto &virtual_display = request["virtual_display"];
+    if (!hestia_has_exact_keys(virtual_display, virtual_display_keys) || !virtual_display["enabled"].is_boolean() ||
+        !hestia_is_one_of(virtual_display["backend"], {"auto", "evdi", "hermes_kms", "none"}) ||
+        !hestia_is_one_of(virtual_display["desktop_integration"], {"auto", "kde_kscreen", "none"}) ||
+        !virtual_display["recover_physical_monitor"].is_boolean()) {
+      error = "Invalid virtual_display object";
+      return false;
+    }
+
+    const auto &app = request["app"];
+    if (!hestia_has_exact_keys(app, app_keys) || !app["id"].is_string() ||
+        !hestia_is_one_of(app["launch_mode"], {"normal", "desktop", "steam_big_picture", "gamescope", "custom"})) {
+      error = "Invalid app object";
+      return false;
+    }
+
+    return true;
+  }
+
+  /**
+   * @brief Store settings for a paired Hestia client's next stream launch.
+   *
+   * The normal GameStream launch path consumes the short-lived settings and
+   * creates a virtual display only when the stream actually begins.
+   */
+  void prepare_hestia_session(resp_https_t response, req_https_t request) {
+    if (!authenticate_hestia_client(response, request, crypto::PERM::launch, "session prepare")) {
+      return;
+    }
+
+    auto content_type = request->header.find("content-type");
+    if (content_type == request->header.end() || !boost::istarts_with(content_type->second, "application/json")) {
+      send_hestia_error(response, SimpleWeb::StatusCode::client_error_bad_request, "invalid_request", "Content-Type must be application/json");
+      return;
+    }
+
+    try {
+      const nlohmann::json input = nlohmann::json::parse(request->content.string());
+      std::string validation_error;
+      if (!validate_hestia_session_prepare(input, validation_error)) {
+        send_hestia_error(response, SimpleWeb::StatusCode::client_error_bad_request, "invalid_request", validation_error.c_str());
+        return;
+      }
+
+      const auto &stream = input["stream"];
+      const auto &virtual_display = input["virtual_display"];
+      const auto &app = input["app"];
+#ifdef _WIN32
+      if (app["launch_mode"] == "gamescope") {
+        send_hestia_error(response, SimpleWeb::StatusCode::client_error_bad_request, "unsupported_feature", "Gamescope is only available on Linux hosts");
+        return;
+      }
+#else
+      if (app["launch_mode"] == "gamescope" && boost::process::v1::search_path("gamescope").empty()) {
+        send_hestia_error(response, SimpleWeb::StatusCode::client_error_bad_request, "unsupported_feature", "Gamescope is not available on this host");
+        return;
+      }
+#endif
+      const auto client = std::static_pointer_cast<crypto::named_cert_t>(request->userp);
+      nvhttp::store_hestia_session_prepare(client->uuid, {
+        .virtual_display = virtual_display["enabled"].get<bool>(),
+        .width = stream["requested_width"].get<int>(),
+        .height = stream["requested_height"].get<int>(),
+        .fps = stream["requested_fps"].get<int>(),
+        .hdr = stream["hdr_mode"] == "hdr",
+        .scale_factor = stream["scale_factor"].get<uint32_t>(),
+        .launch_mode = app["launch_mode"].get<std::string>(),
+      });
+      BOOST_LOG(debug) << "[HestiaAPI] session prepare requested: width=" << stream["requested_width"]
+                       << " height=" << stream["requested_height"] << " fps=" << stream["requested_fps"]
+                       << " virtual_display=" << virtual_display["enabled"]
+                       << " launch_mode=" << app["launch_mode"];
+
+      const nlohmann::json output {
+        {"ok", true},
+        {"session_id", "hestia-" + crypto::rand_alphabet(12)},
+        {"virtual_display", {
+          {"created", false},
+          {"name", ""},
+          {"backend", virtual_display["backend"].get<std::string>()},
+          {"width", stream["requested_width"]},
+          {"height", stream["requested_height"]},
+          {"fps", stream["requested_fps"]},
+          {"hdr", stream["hdr_mode"] == "hdr"},
+          {"kscreen_enabled", false},
+        }},
+        {"warnings", {"Prepared settings will be applied when the normal stream launches."}},
+      };
+      send_response(response, output);
+    } catch (const nlohmann::json::exception &) {
+      send_hestia_error(response, SimpleWeb::StatusCode::client_error_bad_request, "invalid_request", "Request body must be valid JSON");
+    } catch (const std::exception &e) {
+      BOOST_LOG(error) << "[HestiaAPI] session prepare failed: " << e.what();
+      send_hestia_error(response, SimpleWeb::StatusCode::server_error_internal_server_error, "internal_error", "Unable to prepare session");
+    }
+  }
+
+  void stop_hestia_session(resp_https_t response, req_https_t request) {
+    if (!authenticate_hestia_client(response, request, crypto::PERM::launch, "session stop")) {
+      return;
+    }
+
+    const auto client = std::static_pointer_cast<crypto::named_cert_t>(request->userp);
+    nvhttp::clear_hestia_session_prepare(client->uuid);
+    const bool stopped = nvhttp::find_and_stop_session(client->uuid, true);
+    BOOST_LOG(debug) << "[HestiaAPI] session stop requested by client=" << client->uuid
+                     << " stopped=" << stopped;
+    send_response(response, {{"ok", true}, {"stopped", stopped}});
+  }
+
+  nlohmann::json hestia_display_status_json() {
+#ifdef __linux__
+    const auto evdi_status = VDISPLAY::getEvdiStatus();
+    const bool virtual_display_active = !evdi_status.active_displays.empty();
+    const auto *display = virtual_display_active ? &evdi_status.active_displays.front() : nullptr;
+    const bool exclusive_virtual_display = virtual_display_active && config::video.isolated_virtual_display_option;
+
+    return {
+      {"ok", true},
+      {"active", virtual_display_active},
+      {"virtual_display", {
+        {"enabled", virtual_display_active},
+        {"name", display ? display->name : ""},
+        {"backend", virtual_display_active ? "evdi" : "none"},
+        {"width", display ? display->width : 0},
+        {"height", display ? display->height : 0},
+        {"fps", display ? display->fps : 0},
+        {"hdr", false},
+      }},
+      {"physical_display", {
+        {"disabled_during_stream", exclusive_virtual_display},
+        {"saved_primary", exclusive_virtual_display ? proc::proc.initial_display : ""},
+        {"recovery_state_exists", exclusive_virtual_display},
+      }},
+      {"desktop", {
+        {"environment", evdi_status.session_type},
+        {"kscreen_available", evdi_status.output_layout_backend == "kscreen"},
+        {"kscreen_output", display ? display->name : ""},
+      }},
+    };
+#else
+    return {
+      {"ok", true},
+      {"active", false},
+      {"virtual_display", {{"enabled", false}, {"name", ""}, {"backend", "none"}, {"width", 0}, {"height", 0}, {"fps", 0}, {"hdr", false}}},
+      {"physical_display", {{"disabled_during_stream", false}, {"saved_primary", ""}, {"recovery_state_exists", false}}},
+      {"desktop", {{"environment", "unknown"}, {"kscreen_available", false}, {"kscreen_output", ""}}},
+    };
+#endif
+  }
+
+  void get_hestia_display_status(resp_https_t response, req_https_t request) {
+    if (!authenticate_hestia_client(response, request, crypto::PERM::view, "display status")) {
+      return;
+    }
+
+    send_response(response, hestia_display_status_json());
+  }
+
+  void recover_hestia_display(resp_https_t response, req_https_t request) {
+    if (!authenticate_hestia_client(response, request, crypto::PERM::launch, "display recovery")) {
+      return;
+    }
+
+    auto content_type = request->header.find("content-type");
+    if (content_type == request->header.end() || !boost::istarts_with(content_type->second, "application/json")) {
+      send_hestia_error(response, SimpleWeb::StatusCode::client_error_bad_request, "invalid_request", "Content-Type must be application/json");
+      return;
+    }
+
+    try {
+      const nlohmann::json input = nlohmann::json::parse(request->content.string());
+      if (!hestia_has_exact_keys(input, {"force"}) || !input["force"].is_boolean()) {
+        send_hestia_error(response, SimpleWeb::StatusCode::client_error_bad_request, "invalid_request", "Request must contain a boolean force field");
+        return;
+      }
+
+      const std::string restored_output = proc::proc.initial_display;
+      if (proc::proc.running() > 0) {
+        proc::proc.terminate();
+      } else {
+#ifdef __linux__
+        VDISPLAY::restoreExclusiveVirtualDisplay();
+#endif
+        display_device::revert_configuration();
+      }
+
+      const nlohmann::json output {
+        {"ok", true},
+        {"message", "Physical display restored"},
+        {"restored_output", restored_output},
+      };
+      send_response(response, output);
+    } catch (const nlohmann::json::exception &) {
+      send_hestia_error(response, SimpleWeb::StatusCode::client_error_bad_request, "invalid_request", "Request body must be valid JSON");
+    } catch (const std::exception &e) {
+      BOOST_LOG(error) << "[HestiaAPI] display recovery failed: " << e.what();
+      send_hestia_error(response, SimpleWeb::StatusCode::server_error_internal_server_error, "display_recovery_failed", "Unable to recover the physical display");
+    }
+  }
+
+  void get_hestia_commands(resp_https_t response, req_https_t request) {
+    if (!authenticate_hestia_client(response, request, crypto::PERM::server_cmd, "server command list")) {
+      return;
+    }
+
+    nlohmann::json commands = nlohmann::json::array();
+    for (size_t index = 0; index < config::sunshine.server_cmds.size(); ++index) {
+      commands.push_back({
+        {"id", index},
+        {"name", config::sunshine.server_cmds[index].cmd_name},
+        {"requires_confirmation", true},
+      });
+    }
+
+    send_response(response, {{"ok", true}, {"commands", commands}});
+  }
+
+  void get_hestia_client_permissions(resp_https_t response, req_https_t request) {
+    auto client = authenticate_hestia_paired_client(response, request);
+    if (!client) {
+      return;
+    }
+
+    const auto has_permission = [&client](crypto::PERM permission) {
+      return static_cast<bool>(client->perm & permission);
+    };
+    send_response(response, {
+      {"ok", true},
+      {"client_id", client->uuid},
+      {"permissions", {
+        {"view_streams", has_permission(crypto::PERM::view)},
+        {"list_apps", has_permission(crypto::PERM::list)},
+        {"launch_apps", has_permission(crypto::PERM::launch)},
+        {"keyboard_input", has_permission(crypto::PERM::input_kbd)},
+        {"mouse_input", has_permission(crypto::PERM::input_mouse)},
+        {"gamepad_input", has_permission(crypto::PERM::input_controller)},
+        {"virtual_display", has_permission(crypto::PERM::launch)},
+        {"server_commands", has_permission(crypto::PERM::server_cmd)},
+        {"clipboard_sync", platf::clipboard_available() && has_permission(crypto::PERM::clipboard_set) && has_permission(crypto::PERM::clipboard_read)},
+        {"display_recovery", has_permission(crypto::PERM::launch)},
+      }},
+    });
+  }
+
+  void get_hestia_clipboard(resp_https_t response, req_https_t request) {
+    if (!authenticate_hestia_client(response, request, crypto::PERM::clipboard_read, "clipboard read")) {
+      return;
+    }
+    if (!platf::clipboard_available()) {
+      send_hestia_error(response, SimpleWeb::StatusCode::server_error_service_unavailable, "clipboard_unavailable", "Clipboard synchronization is unavailable on this host");
+      return;
+    }
+
+    send_response(response, {{"ok", true}, {"text", platf::get_clipboard()}});
+  }
+
+  void get_hestia_diagnostics(resp_https_t response, req_https_t request) {
+    if (!authenticate_hestia_client(response, request, crypto::PERM::view, "diagnostics")) {
+      return;
+    }
+
+#ifdef __linux__
+    send_response(response, {{"ok", true}, {"dependencies", {{"clipboard", clipboard_status_json()}}}});
+#else
+    send_response(response, {{"ok", true}, {"dependencies", {{"clipboard", {{"available", platf::clipboard_available()}, {"diagnostic", platf::clipboard_available() ? "ready" : "clipboard_unavailable"}, {"manualInstall", "Use the native clipboard service for this platform."}}}}}});
+#endif
+  }
+
+  void set_hestia_clipboard(resp_https_t response, req_https_t request) {
+    if (!authenticate_hestia_client(response, request, crypto::PERM::clipboard_set, "clipboard write")) {
+      return;
+    }
+    if (!platf::clipboard_available()) {
+      send_hestia_error(response, SimpleWeb::StatusCode::server_error_service_unavailable, "clipboard_unavailable", "Clipboard synchronization is unavailable on this host");
+      return;
+    }
+
+    auto content_type = request->header.find("content-type");
+    if (content_type == request->header.end() || !boost::istarts_with(content_type->second, "application/json")) {
+      send_hestia_error(response, SimpleWeb::StatusCode::client_error_bad_request, "invalid_request", "Content-Type must be application/json");
+      return;
+    }
+
+    try {
+      const nlohmann::json input = nlohmann::json::parse(request->content.string());
+      if (!hestia_has_exact_keys(input, {"text"}) || !input["text"].is_string()) {
+        send_hestia_error(response, SimpleWeb::StatusCode::client_error_bad_request, "invalid_request", "Request must contain only a text field");
+        return;
+      }
+      const std::string text = input["text"].get<std::string>();
+      if (text.size() > 64 * 1024 || text.find('\0') != std::string::npos || !platf::set_clipboard(text)) {
+        send_hestia_error(response, SimpleWeb::StatusCode::client_error_bad_request, "invalid_request", "Clipboard text is invalid, too large, or unavailable");
+        return;
+      }
+      send_response(response, {{"ok", true}});
+    } catch (const nlohmann::json::exception &) {
+      send_hestia_error(response, SimpleWeb::StatusCode::client_error_bad_request, "invalid_request", "Request body must be valid JSON");
+    }
+  }
+
+  void run_hestia_command(resp_https_t response, req_https_t request) {
+    if (!authenticate_hestia_client(response, request, crypto::PERM::server_cmd, "server command execution")) {
+      return;
+    }
+
+    auto content_type = request->header.find("content-type");
+    if (content_type == request->header.end() || !boost::istarts_with(content_type->second, "application/json")) {
+      send_hestia_error(response, SimpleWeb::StatusCode::client_error_bad_request, "invalid_request", "Content-Type must be application/json");
+      return;
+    }
+
+    try {
+      const nlohmann::json input = nlohmann::json::parse(request->content.string());
+      if (!hestia_has_exact_keys(input, {"id"}) || !input["id"].is_number_integer()) {
+        send_hestia_error(response, SimpleWeb::StatusCode::client_error_bad_request, "invalid_request", "Request must contain an integer id field");
+        return;
+      }
+
+      const int command_id = input["id"].get<int>();
+      if (command_id < 0 || static_cast<size_t>(command_id) >= config::sunshine.server_cmds.size()) {
+        send_hestia_error(response, SimpleWeb::StatusCode::client_error_bad_request, "invalid_request", "Unknown server command id");
+        return;
+      }
+
+      const auto &configured_command = config::sunshine.server_cmds[command_id];
+      const std::string command = configured_command.cmd_val;
+      const bool elevated = configured_command.elevated;
+      BOOST_LOG(info) << "[HestiaAPI] executing configured server command id=" << command_id;
+      std::thread([command, elevated] {
+        std::error_code ec;
+        auto env = proc::proc.get_env();
+        auto working_dir = proc::find_working_directory(command, env);
+        auto child = platf::run_command(elevated, true, command, working_dir, env, nullptr, ec, nullptr);
+        if (ec) {
+          BOOST_LOG(error) << "[HestiaAPI] server command failed to start: " << ec.message();
+        } else {
+          child.detach();
+        }
+      }).detach();
+
+      send_response(response, {{"ok", true}});
+    } catch (const nlohmann::json::exception &) {
+      send_hestia_error(response, SimpleWeb::StatusCode::client_error_bad_request, "invalid_request", "Request body must be valid JSON");
+    }
   }
 
   /**
@@ -1076,6 +1743,207 @@ namespace confighttp {
       BOOST_LOG(warning) << "SaveConfig: "sv << e.what();
       bad_request(response, request, e.what());
     }
+  }
+
+  /**
+   * Start EVDI installation only after the user explicitly confirms it in the UI.
+   * pkexec owns the privilege prompt, so Apollo never handles an admin password.
+   */
+  void installEvdi(resp_https_t response, req_https_t request) {
+    if (!validateContentType(response, request, "application/json") || !authenticate(response, request)) {
+      return;
+    }
+
+    print_req(request);
+    nlohmann::json output_tree;
+
+#ifdef __linux__
+    try {
+      std::stringstream ss;
+      ss << request->content.rdbuf();
+      if (!nlohmann::json::parse(ss).value("confirm", false)) {
+        bad_request(response, request, "EVDI installation requires explicit confirmation");
+        return;
+      }
+
+      // Fixed command only: no request data is passed to a privileged shell.
+      constexpr auto install_command = R"EVDI(pkexec sh -c 'set -eu
+if command -v pacman >/dev/null 2>&1; then
+  pacman -S --needed --noconfirm evdi
+elif command -v apt-get >/dev/null 2>&1; then
+  apt-get update
+  apt-get install -y evdi-dkms libevdi1
+elif command -v dnf >/dev/null 2>&1; then
+  dnf install -y evdi akmod-evdi
+else
+  echo "Unsupported package manager. Install EVDI manually." >&2
+  exit 2
+fi
+if command -v dkms >/dev/null 2>&1; then
+  dkms autoinstall -k "$(uname -r)"
+fi
+printf "options evdi initial_device_count=1\n" > /etc/modprobe.d/apollo-evdi.conf
+modprobe -r evdi 2>/dev/null || true
+modprobe evdi
+printf "evdi\\n" > /etc/modules-load.d/evdi.conf')EVDI";
+
+      if (evdi_install_status.load() == 1) {
+        output_tree["status"] = true;
+        output_tree["installStatus"] = "running";
+        send_response(response, output_tree);
+        return;
+      }
+
+      evdi_install_status.store(1);
+      std::thread([install_command] {
+        auto working_dir = boost::filesystem::path(std::getenv("HOME") ?: "/tmp");
+        auto env = boost::this_process::environment();
+        std::error_code ec;
+        auto child = platf::run_command(false, true, install_command, working_dir, env, nullptr, ec, nullptr);
+        if (ec) {
+          BOOST_LOG(warning) << "Unable to launch EVDI installer: " << ec.message();
+          evdi_install_status.store(3);
+          return;
+        }
+
+        child.wait();
+        if (child.exit_code() != 0) {
+          BOOST_LOG(warning) << "EVDI installer exited with code " << child.exit_code();
+          evdi_install_status.store(3);
+          return;
+        }
+
+        proc::initVDisplayDriver();
+        evdi_install_status.store(proc::vDisplayDriverStatus == VDISPLAY::DRIVER_STATUS::OK ? 2 : 3);
+      }).detach();
+
+      output_tree["status"] = true;
+      output_tree["installStatus"] = "running";
+    } catch (const std::exception &e) {
+      BOOST_LOG(warning) << "InstallEvdi: " << e.what();
+      bad_request(response, request, e.what());
+      return;
+    }
+#else
+    output_tree["status"] = false;
+    output_tree["error"] = "EVDI is only available on Linux.";
+#endif
+
+    send_response(response, output_tree);
+  }
+
+  /** Return the state of the EVDI installation started by this Web UI. */
+  void getEvdiInstallStatus(resp_https_t response, req_https_t request) {
+    if (!authenticate(response, request)) {
+      return;
+    }
+
+    nlohmann::json output_tree;
+    output_tree["status"] = true;
+    output_tree["installStatus"] = evdi_install_status.load();
+    output_tree["vdisplayStatus"] = (int)proc::vDisplayDriverStatus;
+#ifdef __linux__
+    output_tree["evdiInfo"] = evdi_status_json();
+    output_tree["evdiDiagnostic"] = output_tree["evdiInfo"]["diagnostic"];
+#endif
+    send_response(response, output_tree);
+  }
+
+  /** Return the current EVDI runtime and DKMS status for the Audio/Video UI. */
+  void getEvdiStatus(resp_https_t response, req_https_t request) {
+    if (!authenticate(response, request)) {
+      return;
+    }
+
+    nlohmann::json output_tree;
+#ifdef __linux__
+    output_tree["status"] = true;
+    output_tree["evdiInfo"] = evdi_status_json();
+#else
+    output_tree["status"] = false;
+    output_tree["error"] = "EVDI is only available on Linux.";
+#endif
+    send_response(response, output_tree);
+  }
+
+  void getClipboardStatus(resp_https_t response, req_https_t request) {
+    if (!authenticate(response, request)) {
+      return;
+    }
+
+    nlohmann::json output_tree;
+#ifdef __linux__
+    output_tree["status"] = true;
+    output_tree["clipboardInfo"] = clipboard_status_json();
+    output_tree["installStatus"] = clipboard_install_status.load();
+#else
+    output_tree["status"] = true;
+    output_tree["clipboardInfo"] = {{"available", platf::clipboard_available()}, {"diagnostic", platf::clipboard_available() ? "ready" : "clipboard_unavailable"}, {"manualInstall", "Use the native clipboard service for this platform."}};
+    output_tree["installStatus"] = 0;
+#endif
+    send_response(response, output_tree);
+  }
+
+  void installClipboard(resp_https_t response, req_https_t request) {
+    if (!validateContentType(response, request, "application/json") || !authenticate(response, request)) {
+      return;
+    }
+
+    nlohmann::json output_tree;
+#ifdef __linux__
+    try {
+      std::stringstream ss;
+      ss << request->content.rdbuf();
+      if (!nlohmann::json::parse(ss).value("confirm", false)) {
+        bad_request(response, request, "Clipboard installation requires explicit confirmation");
+        return;
+      }
+      if (clipboard_install_status.load() == 1) {
+        output_tree["status"] = true;
+        output_tree["installStatus"] = "running";
+        send_response(response, output_tree);
+        return;
+      }
+
+      // Fixed package-manager commands only. No request value reaches the shell.
+      constexpr auto install_command = R"CLIP(pkexec sh -c 'set -eu
+if command -v pacman >/dev/null 2>&1; then
+  pacman -S --needed --noconfirm wl-clipboard xclip
+elif command -v apt-get >/dev/null 2>&1; then
+  apt-get update
+  apt-get install -y wl-clipboard xclip
+elif command -v dnf >/dev/null 2>&1; then
+  dnf install -y wl-clipboard xclip
+else
+  echo "Unsupported package manager. Install wl-clipboard and xclip manually." >&2
+  exit 2
+fi')CLIP";
+      clipboard_install_status.store(1);
+      std::thread([install_command] {
+        auto working_dir = boost::filesystem::path(std::getenv("HOME") ?: "/tmp");
+        auto env = boost::this_process::environment();
+        std::error_code ec;
+        auto child = platf::run_command(false, true, install_command, working_dir, env, nullptr, ec, nullptr);
+        if (ec) {
+          BOOST_LOG(warning) << "Unable to launch clipboard installer: " << ec.message();
+          clipboard_install_status.store(3);
+          return;
+        }
+        child.wait();
+        clipboard_install_status.store(child.exit_code() == 0 ? 2 : 3);
+      }).detach();
+      output_tree["status"] = true;
+      output_tree["installStatus"] = "running";
+    } catch (const std::exception &e) {
+      BOOST_LOG(warning) << "InstallClipboard: " << e.what();
+      bad_request(response, request, e.what());
+      return;
+    }
+#else
+    output_tree["status"] = false;
+    output_tree["error"] = "Automatic clipboard dependency installation is only available on Linux.";
+#endif
+    send_response(response, output_tree);
   }
 
   /**
@@ -1509,6 +2377,25 @@ namespace confighttp {
     auto port_https = net::map_port(PORT_HTTPS);
     auto address_family = net::af_from_enum_string(config::sunshine.address_family);
     https_server_t server { config::nvhttp.cert, config::nvhttp.pkey };
+    server.authenticate_client = [](const req_https_t &request, SSL *ssl) {
+      crypto::x509_t certificate {
+#if OPENSSL_VERSION_MAJOR >= 3
+        SSL_get1_peer_certificate(ssl)
+#else
+        SSL_get_peer_certificate(ssl)
+#endif
+      };
+      if (!certificate) {
+        return;
+      }
+
+      crypto::p_named_cert_t client;
+      if (nvhttp::verify_paired_client_certificate(certificate.get(), client)) {
+        request->userp = std::move(client);
+      } else {
+        BOOST_LOG(info) << "[HestiaAPI] unpaired client certificate rejected";
+      }
+    };
     server.default_resource["DELETE"] = [](resp_https_t response, req_https_t request) {
       bad_request(response, request);
     };
@@ -1542,6 +2429,23 @@ namespace confighttp {
     server.resource["^/api/logs$"]["GET"] = getLogs;
     server.resource["^/api/config$"]["GET"] = getConfig;
     server.resource["^/api/config$"]["POST"] = saveConfig;
+    server.resource["^/api/evdi/install$"]["POST"] = installEvdi;
+    server.resource["^/api/evdi/install/status$"]["GET"] = getEvdiInstallStatus;
+    server.resource["^/api/evdi/status$"]["GET"] = getEvdiStatus;
+    server.resource["^/api/clipboard/status$"]["GET"] = getClipboardStatus;
+    server.resource["^/api/clipboard/install$"]["POST"] = installClipboard;
+    server.resource["^/api/hestia/v1/?$"]["GET"] = getHestiaCapabilities;
+    server.resource["^/api/hestia/v1/capabilities$"]["GET"] = getHestiaCapabilities;
+    server.resource["^/api/hestia/v1/session/prepare$"]["POST"] = prepare_hestia_session;
+    server.resource["^/api/hestia/v1/session/stop$"]["POST"] = stop_hestia_session;
+    server.resource["^/api/hestia/v1/display/status$"]["GET"] = get_hestia_display_status;
+    server.resource["^/api/hestia/v1/display/recover$"]["POST"] = recover_hestia_display;
+    server.resource["^/api/hestia/v1/client/permissions$"]["GET"] = get_hestia_client_permissions;
+    server.resource["^/api/hestia/v1/diagnostics$"]["GET"] = get_hestia_diagnostics;
+    server.resource["^/api/hestia/v1/clipboard$"]["GET"] = get_hestia_clipboard;
+    server.resource["^/api/hestia/v1/clipboard$"]["POST"] = set_hestia_clipboard;
+    server.resource["^/api/hestia/v1/commands$"]["GET"] = get_hestia_commands;
+    server.resource["^/api/hestia/v1/commands/run$"]["POST"] = run_hestia_command;
     server.resource["^/api/configLocale$"]["GET"] = getLocale;
     server.resource["^/api/restart$"]["POST"] = restart;
     server.resource["^/api/quit$"]["POST"] = quit;

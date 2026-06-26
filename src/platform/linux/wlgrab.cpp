@@ -3,12 +3,14 @@
  * @brief Definitions for wlgrab capture.
  */
 // standard includes
+#include <algorithm>
 #include <thread>
 
 // local includes
 #include "cuda.h"
 #include "src/logging.h"
 #include "src/platform/common.h"
+#include "virtual_display.h"
 #include "src/video.h"
 #include "vaapi.h"
 #include "wayland.h"
@@ -50,6 +52,11 @@ namespace wl {
         return -1;
       }
 
+      if (interface.monitors.empty()) {
+        BOOST_LOG(error) << "Wayland compositor did not advertise any enabled outputs."sv;
+        return -1;
+      }
+
       auto monitor = interface.monitors[0].get();
 
       if (!display_name.empty() && display_name.rfind("VIRTUAL-", 0) != 0) {
@@ -59,8 +66,23 @@ namespace wl {
         if (streamedMonitor >= 0 && streamedMonitor < interface.monitors.size()) {
           monitor = interface.monitors[streamedMonitor].get();
         }
-      } else if (display_name.rfind("VIRTUAL-", 0) == 0) {
-        BOOST_LOG(debug) << "Virtual display detected ["sv << display_name << "], using primary monitor for Wayland capture"sv;
+      } else if (display_name.rfind("VIRTUAL-", 0) == 0 || VDISPLAY::isHermesKmsDisplay(display_name)) {
+        auto connector = VDISPLAY::getHermesKmsConnectorName(display_name);
+        const char *backend_label = "Hermes-KMS";
+        if (connector.empty()) {
+          connector = VDISPLAY::getEvdiConnectorName(display_name);
+          backend_label = "EVDI";
+        }
+        const auto monitor_it = std::find_if(interface.monitors.begin(), interface.monitors.end(), [&](const auto &candidate) {
+          return candidate->name == connector || candidate->description.find(connector) != std::string::npos;
+        });
+        if (connector.empty() || monitor_it == interface.monitors.end()) {
+          BOOST_LOG(error) << "Wayland "sv << backend_label << " output " << display_name
+                           << " is not enabled by the compositor; refusing to capture a physical monitor."sv;
+          return -1;
+        }
+        monitor = monitor_it->get();
+        BOOST_LOG(info) << "Selected Wayland "sv << backend_label << " output " << connector;
       }
 
       monitor->listen(interface.output_manager);
@@ -177,6 +199,7 @@ namespace wl {
       if (status != platf::capture_e::ok) {
         return status;
       }
+      auto frame_timestamp = std::chrono::steady_clock::now();
 
       auto current_frame = dmabuf.current_frame;
 
@@ -200,6 +223,7 @@ namespace wl {
 
       gl::ctx.GetTextureSubImage((*rgb_opt)->tex[0], 0, 0, 0, 0, width, height, 1, GL_BGRA, GL_UNSIGNED_BYTE, img_out->height * img_out->row_pitch, img_out->data);
       gl::ctx.BindTexture(GL_TEXTURE_2D, 0);
+      img_out->frame_timestamp = frame_timestamp;
 
       return platf::capture_e::ok;
     }
@@ -307,6 +331,7 @@ namespace wl {
       if (status != platf::capture_e::ok) {
         return status;
       }
+      auto frame_timestamp = std::chrono::steady_clock::now();
 
       if (!pull_free_image_cb(img_out)) {
         return platf::capture_e::interrupted;
@@ -320,6 +345,7 @@ namespace wl {
       img->sequence = sequence;
 
       img->sd = current_frame->sd;
+      img->frame_timestamp = frame_timestamp;
 
       // Prevent dmabuf from closing the file descriptors.
       std::fill_n(current_frame->sd.fds, 4, -1);

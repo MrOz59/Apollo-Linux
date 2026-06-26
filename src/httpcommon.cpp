@@ -6,6 +6,7 @@
 
 // standard includes
 #include <filesystem>
+#include <fstream>
 #include <utility>
 
 // lib includes
@@ -68,11 +69,12 @@ namespace http {
   }
 
   int save_user_creds(const std::string &file, const std::string &username, const std::string &password, bool run_our_mouth) {
-    pt::ptree outputTree;
+    nlohmann::json outputTree;
 
     if (fs::exists(file)) {
       try {
-        pt::read_json(file, outputTree);
+        std::ifstream in(file);
+        in >> outputTree;
       } catch (std::exception &e) {
         BOOST_LOG(error) << "Couldn't read user credentials: "sv << e.what();
         return -1;
@@ -80,11 +82,12 @@ namespace http {
     }
 
     auto salt = crypto::rand_alphabet(16);
-    outputTree.put("username", username);
-    outputTree.put("salt", salt);
-    outputTree.put("password", util::hex(crypto::hash(password + salt)).to_string());
+    outputTree["username"] = username;
+    outputTree["salt"] = salt;
+    outputTree["password"] = util::hex(crypto::hash(password + salt)).to_string();
     try {
-      pt::write_json(file, outputTree);
+      std::ofstream out(file);
+      out << outputTree.dump(4);  // Pretty-print with an indent of 4 spaces.
     } catch (std::exception &e) {
       BOOST_LOG(error) << "error writing to the credentials file, perhaps try this again as an administrator? Details: "sv << e.what();
       return -1;

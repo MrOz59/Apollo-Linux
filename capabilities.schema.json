@@ -1,0 +1,100 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hestia-hermes.local/schemas/capabilities.schema.json",
+  "title": "Hestia Hermes Capabilities Response",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "ok",
+    "server_name",
+    "base",
+    "hestia_protocol",
+    "min_client_protocol",
+    "max_client_protocol",
+    "server_version",
+    "compatibility",
+    "features",
+    "limits"
+  ],
+  "properties": {
+    "ok": { "const": true },
+    "server_name": { "const": "Hermes" },
+    "base": { "const": "Apollo" },
+    "hestia_protocol": { "const": 1 },
+    "min_client_protocol": { "const": 1 },
+    "max_client_protocol": { "const": 1 },
+    "server_version": { "type": "string", "minLength": 1 },
+    "compatibility": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["gamestream", "moonlight", "sunshine"],
+      "properties": {
+        "gamestream": { "type": "boolean" },
+        "moonlight": { "type": "boolean" },
+        "sunshine": { "type": "boolean" }
+      }
+    },
+    "features": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "virtual_display",
+        "virtual_display_backend",
+        "kde_kscreen",
+        "display_recovery",
+        "client_resolution_matching",
+        "client_fps_matching",
+        "hdr_mode_control",
+        "scale_factor",
+        "gamescope_session",
+        "server_commands",
+        "clipboard_sync",
+        "permission_system"
+      ],
+      "properties": {
+        "virtual_display": { "type": "boolean" },
+        "virtual_display_backend": {
+          "type": "array",
+          "items": { "enum": ["evdi", "hermes_kms"] },
+          "uniqueItems": true
+        },
+        "kde_kscreen": { "type": "boolean" },
+        "display_recovery": { "type": "boolean" },
+        "client_resolution_matching": { "type": "boolean" },
+        "client_fps_matching": { "type": "boolean" },
+        "hdr_mode_control": { "type": "boolean" },
+        "scale_factor": { "type": "boolean" },
+        "gamescope_session": { "type": "boolean" },
+        "server_commands": { "type": "boolean" },
+        "clipboard_sync": { "type": "boolean" },
+        "permission_system": { "type": "boolean" }
+      }
+    },
+    "limits": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "max_width",
+        "max_height",
+        "max_fps",
+        "supported_fps",
+        "supported_codecs"
+      ],
+      "properties": {
+        "max_width": { "type": "integer", "minimum": 1 },
+        "max_height": { "type": "integer", "minimum": 1 },
+        "max_fps": { "type": "integer", "minimum": 1 },
+        "supported_fps": {
+          "type": "array",
+          "items": { "type": "integer", "minimum": 1 },
+          "uniqueItems": true
+        },
+        "supported_codecs": {
+          "type": "array",
+          "items": { "enum": ["h264", "hevc", "av1"] },
+          "uniqueItems": true
+        }
+      }
+    }
+  }
+}

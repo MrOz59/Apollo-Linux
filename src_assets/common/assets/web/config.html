@@ -56,6 +56,9 @@
         :config="config"
         :platform="platform"
         :vdisplay="vdisplayStatus"
+        :evdi-setup-required="evdiSetupRequired"
+        :evdi-diagnostic="evdiDiagnostic"
+        :evdi-info="evdiInfo"
       >
       </audio-video>
 
@@ -137,6 +140,9 @@
         config: null,
         currentTab: "general",
         vdisplayStatus: "1",
+        evdiSetupRequired: false,
+        evdiDiagnostic: "",
+        evdiInfo: null,
         global_prep_cmd: [],
         global_state_cmd: [],
         server_cmd: [],
@@ -195,6 +201,7 @@
               "stream_audio": "enabled",
               "adapter_name": "",
               "output_name": "",
+              "virtual_display_backend": "evdi",
               "fallback_mode": "",
               "dd_configuration_option": "disabled",
               "dd_resolution_option": "auto",
@@ -360,6 +367,18 @@
 
           this.vdisplayStatus = this.config.vdisplayStatus;
           delete this.config.vdisplayStatus;
+
+          this.evdiSetupRequired = this.config.evdiSetupRequired;
+          delete this.config.evdiSetupRequired;
+
+          this.evdiDiagnostic = this.config.evdiDiagnostic;
+          delete this.config.evdiDiagnostic;
+
+          this.evdiInfo = this.config.evdiInfo;
+          delete this.config.evdiInfo;
+
+          this.clipboardInfo = this.config.clipboardInfo;
+          delete this.config.clipboardInfo;
 
           fallbackDisplayModeCache = this.config.fallback_mode || "";
 

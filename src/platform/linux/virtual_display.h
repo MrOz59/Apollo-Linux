@@ -5,7 +5,13 @@
 #pragma once
 
 // standard includes
+#include <atomic>
+#include <chrono>
+#include <condition_variable>
+#include <cstdint>
 #include <functional>
+#include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -27,10 +33,66 @@ namespace VDISPLAY {
   };
 
   /**
+   * @brief Actionable EVDI state exposed to the Web UI.
+   *
+   * The generic driver status only tells callers that virtual displays are
+   * unavailable. This enum identifies the host-side condition a user can fix.
+   */
+  enum class EVDI_DIAGNOSTIC {
+    READY,
+    INITIAL_DEVICE_CONFIGURATION_REQUIRED,
+    LIBRARY_MISSING,
+    MODULE_NOT_INSTALLED,
+    MODULE_NOT_LOADED,
+    DKMS_BUILD_FAILED,
+  };
+
+  struct EvdiVirtualDisplayStatus {
+    std::string name;
+    int device_index;
+    int drm_card_index;
+    uint32_t width;
+    uint32_t height;
+    uint32_t fps;
+    uint64_t frame_updates;
+  };
+
+  struct EvdiStatus {
+    EVDI_DIAGNOSTIC diagnostic;
+    bool library_installed;
+    bool library_loaded;
+    bool module_loaded;
+    bool module_installed;
+    int device_count;
+    std::string session_type;
+    bool exclusive_layout_supported;
+    std::string output_layout_backend;
+    bool capture_fallback_active;
+    std::string library_version;
+    std::string running_kernel;
+    std::vector<std::string> dkms_kernels;
+    std::vector<EvdiVirtualDisplayStatus> active_displays;
+  };
+
+  /**
    * @brief Initialize the virtual display driver.
    * @return DRIVER_STATUS indicating the result of initialization.
    */
   DRIVER_STATUS openVDisplayDevice();
+
+  /**
+   * @brief Whether EVDI needs a device pre-created at module load time.
+   *
+   * This occurs when the loaded module has no devices and the current Apollo
+   * process cannot write to EVDI's root-only sysfs add endpoint.
+   */
+  bool needsInitialDeviceConfiguration();
+
+  /** Return the most specific available EVDI diagnostic for the current host. */
+  EVDI_DIAGNOSTIC getEvdiDiagnostic();
+
+  /** Return runtime, DKMS, and frame-update details for the Audio/Video UI. */
+  EvdiStatus getEvdiStatus();
 
   /**
    * @brief Close the virtual display driver.
@@ -98,6 +160,21 @@ namespace VDISPLAY {
    */
   int changeDisplaySettings2(const char *deviceName, int width, int height, int refresh_rate, bool bApplyIsolated = false);
 
+  /** Return the compositor-facing connector name for an EVDI display. */
+  std::string getEvdiConnectorName(const std::string &displayName);
+
+  /** Return the compositor-facing connector name for a Hermes-KMS display. */
+  std::string getHermesKmsConnectorName(const std::string &displayName);
+
+  /** Record whether capture was routed away from an uncomposited virtual output. */
+  void setVirtualDisplayCaptureFallbackActive(bool active);
+
+  /** Activate a virtual output using the current session's display protocol. */
+  bool activateVirtualDisplayOutput(const std::string &displayName);
+  /** Enable/restore exclusive layout for an EVDI virtual display. */
+  bool enableExclusiveVirtualDisplay(const std::string &displayName);
+  void restoreExclusiveVirtualDisplay();
+
   /**
    * @brief Get the primary display name.
    * @return The name of the primary display.
@@ -140,11 +217,93 @@ namespace VDISPLAY {
    */
   bool isEvdiDisplay(const std::string &displayName);
 
+  /** Check if a display is a Hermes-KMS virtual display. */
+  bool isHermesKmsDisplay(const std::string &displayName);
+
   /**
    * @brief Get the DRM card index for an EVDI display.
    * @param displayName The name of the EVDI display.
    * @return The card index, or -1 if not found or not an EVDI display.
    */
   int getEvdiCardIndex(const std::string &displayName);
+
+  /** Get the DRM card index for a Hermes-KMS display. */
+  int getHermesKmsCardIndex(const std::string &displayName);
+
+  /**
+   * CPU-side BGRA buffer filled directly by libevdi. EVDI is a virtual DRM
+   * device rather than a render GPU, so this avoids sending its card through
+   * GBM/EGL, which can crash in Mesa when no render node exists.
+   */
+  class EvdiBuffer {
+  public:
+    EvdiBuffer(uint32_t width, uint32_t height);
+    EvdiBuffer(const EvdiBuffer &) = delete;
+    EvdiBuffer &operator=(const EvdiBuffer &) = delete;
+
+    uint32_t width() const { return width_; }
+    uint32_t height() const { return height_; }
+    uint32_t stride() const { return width_ * 4; }
+    uint64_t frame_number() const { return frame_number_.load(std::memory_order_acquire); }
+    void *raw_buffer() { return data_.data(); }
+    uint64_t copy_to(uint8_t *dst, uint32_t dst_stride) const;
+    uint64_t wait_for_update(uint64_t last_frame, std::chrono::milliseconds timeout);
+    void begin_write();
+    void end_write();
+    void mark_updated();
+
+  private:
+    mutable std::mutex mutex_;
+    std::condition_variable condition_;
+    std::vector<uint8_t> data_;
+    uint32_t width_;
+    uint32_t height_;
+    std::atomic<uint64_t> frame_number_ {0};
+  };
+
+  /** Return the active CPU capture buffer for an EVDI virtual display. */
+  std::shared_ptr<EvdiBuffer> getEvdiBuffer(const std::string &display_name);
+
+  /**
+   * Zero-copy capture of a Hermes-KMS virtual display.
+   *
+   * The compositor (KWin/GNOME) owns the primary card node and scans out the
+   * desktop; this side opens the render node and pulls the current scanout
+   * framebuffer as DMA-BUFs via DRM_IOCTL_HERMES_KMS_ACQUIRE_FRAME. No DRM
+   * master and no KMS access are required, so it coexists with the compositor.
+   */
+  struct HermesKmsFrame {
+    int width {0};
+    int height {0};
+    uint32_t fourcc {0};
+    uint64_t modifier {0};
+    uint32_t plane_count {0};
+    int dma_buf_fd[4] {-1, -1, -1, -1};
+    uint32_t pitch[4] {0, 0, 0, 0};
+    uint32_t offset[4] {0, 0, 0, 0};
+    int sync_file_fd {-1};
+    uint64_t sequence {0};
+    long long acquire_ns {0};  ///< Time spent in the ACQUIRE_FRAME ioctl only.
+
+    void close();  ///< Close all owned fds (dma_buf_fd[] and sync_file_fd).
+  };
+
+  /**
+   * Open the render node of the Hermes-KMS card behind @p display_name.
+   * @return a render-node fd >= 0 on success, or -1 on failure.
+   */
+  int hermesKmsOpenCapture(const std::string &display_name);
+
+  /** Query the active scanout geometry. @return true on success. */
+  bool hermesKmsCaptureSize(int render_fd, int &width, int &height);
+
+  /**
+   * Acquire the current scanout frame as DMA-BUFs. Blocks up to @p timeout_ms
+   * for a frame newer than @p after_sequence (pass 0 to take whatever is
+   * current). On success @p out owns the returned fds; the caller must call
+   * out.close() when done. @return true on success.
+   */
+  bool hermesKmsAcquireFrame(int render_fd, uint64_t after_sequence,
+                             uint32_t timeout_ms, HermesKmsFrame &out);
 
 }  // namespace VDISPLAY

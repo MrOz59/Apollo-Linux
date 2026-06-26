@@ -3,7 +3,7 @@
 
 pkgname=apollo
 pkgver=0.1.0
-pkgrel=1
+pkgrel=4
 pkgdesc="Self-hosted game streaming server with virtual display support"
 arch=('x86_64')
 url='https://github.com/ClassicOldSong/Apollo'
@@ -33,52 +33,60 @@ depends=(
   'udev'
 )
 
+makedepends=(
+  'base-devel'
+  'cmake'
+  'git'
+  'git-lfs'
+  'nodejs'
+  'npm'
+)
+
 optdepends=(
   'cuda: NVIDIA GPU encoding support'
+  'gamescope: optional Gamescope Steam Session app'
+  'kscreen: KDE Plasma Wayland virtual-display activation'
+  'wl-clipboard: Hermes text clipboard synchronization on Wayland'
+  'xclip: Hermes text clipboard synchronization on X11'
   'libva-mesa-driver: AMD GPU encoding support'
 )
 
 provides=('sunshine')
 conflicts=('sunshine')
 
-# Usar o build local já compilado
 source=()
 sha256sums=()
 
-package() {
-    # Copiar do build debug
+prepare() {
     cd "${startdir}"
-    
-    # Executável
-    install -Dm755 "cmake-build-debug/sunshine" "${pkgdir}/usr/bin/apollo"
-    
-    # Assets
-    install -dm755 "${pkgdir}/usr/share/apollo"
-    cp -r cmake-build-debug/assets/* "${pkgdir}/usr/share/apollo/"
-    
-    # Ícones
-    install -Dm644 "apollo.svg" "${pkgdir}/usr/share/icons/hicolor/scalable/apps/apollo.svg"
-    install -Dm644 "apollo.svg" "${pkgdir}/usr/share/icons/hicolor/scalable/status/apollo-tray.svg"
-    install -Dm644 "src_assets/common/assets/web/public/images/apollo-playing.svg" \
-        "${pkgdir}/usr/share/icons/hicolor/scalable/status/apollo-playing.svg"
-    install -Dm644 "src_assets/common/assets/web/public/images/apollo-pausing.svg" \
-        "${pkgdir}/usr/share/icons/hicolor/scalable/status/apollo-pausing.svg"
-    install -Dm644 "src_assets/common/assets/web/public/images/apollo-locked.svg" \
-        "${pkgdir}/usr/share/icons/hicolor/scalable/status/apollo-locked.svg"
-    
-    # Udev rules
-    install -Dm644 "src_assets/linux/misc/60-sunshine.rules" \
-        "${pkgdir}/usr/lib/udev/rules.d/60-apollo.rules"
-    
-    # Systemd service
-    install -Dm644 "cmake-build-debug/sunshine.service" \
-        "${pkgdir}/usr/lib/systemd/user/apollo.service"
-    
-    # Desktop file
-    install -Dm644 "cmake-build-debug/dev.lizardbyte.app.Sunshine.desktop" \
-        "${pkgdir}/usr/share/applications/apollo.desktop"
-    
-    # Modificar desktop file
-    sed -i 's/sunshine/apollo/g; s/Sunshine/Apollo/g' \
-        "${pkgdir}/usr/share/applications/apollo.desktop"
+    # A source checkout already containing the submodules needs no mutation
+    # of .git metadata (for example, when building in a restricted sandbox).
+    if [[ ! -d third-party/moonlight-common-c/enet ]]; then
+      git submodule update --init --recursive
+    fi
+    if command -v git-lfs >/dev/null 2>&1; then
+      git lfs pull
+    fi
+}
+
+build() {
+    cd "${startdir}"
+    export BRANCH=local
+    export BUILD_VERSION="${pkgver}"
+
+    cmake -S . -B build \
+      -DCMAKE_BUILD_TYPE=Release \
+      -DBUILD_TESTS=OFF \
+      -DCMAKE_INSTALL_PREFIX=/usr \
+      -DSUNSHINE_EXECUTABLE_PATH=/usr/bin/apollo \
+      -DSUNSHINE_ASSETS_DIR=share/apollo
+    cmake --build build
+}
+
+package() {
+    cd "${startdir}"
+    DESTDIR="${pkgdir}" cmake --install build
+
+    rm "${pkgdir}/usr/bin/sunshine"
+    mv "${pkgdir}/usr/bin/sunshine-"* "${pkgdir}/usr/bin/apollo"
 }

@@ -1867,6 +1867,11 @@ namespace platf {
     std::wstring cpContent = from_utf8(ensureCrLf(content));
     return !setClipboardData(cpContent);
   }
+
+  bool
+  clipboard_available() {
+    return true;
+  }
 }  // namespace platf
 
 static std::string ensureCrLf(const std::string& utf8Str) {

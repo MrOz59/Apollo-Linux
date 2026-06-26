@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+
+set -u
+
+STATE_DIR="${XDG_STATE_HOME:-${HOME:-}/.local/state}/apollo"
+STATE_FILE="$STATE_DIR/saved-primary"
+
+if [[ ! -s "$STATE_FILE" ]]; then
+  exit 0
+fi
+
+OUTPUT="$(head -n 1 "$STATE_FILE" | tr -d '\r\n ')"
+if [[ ! "$OUTPUT" =~ ^[A-Za-z0-9_-]{1,64}$ ]]; then
+  rm -f "$STATE_FILE"
+  exit 0
+fi
+
+if command -v kscreen-doctor >/dev/null 2>&1; then
+  kscreen-doctor "output.$OUTPUT.enable" "output.$OUTPUT.priority.1" >/dev/null 2>&1 || true
+fi
+
+rm -f "$STATE_FILE"

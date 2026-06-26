@@ -447,6 +447,7 @@ namespace config {
     0,  // av1_mode
 
     2,  // min_threads
+    100,  // default_scale_factor
     {
       "superfast"s,  // preset
       "zerolatency"s,  // tune
@@ -490,12 +491,14 @@ namespace config {
 
     {
       false,  // strict_rc_buffer
+      -1,  // quality
     },  // vaapi
 
     {},  // capture
     {},  // encoder
     {},  // adapter_name
     {},  // output_name
+    "evdi"s,  // virtual_display_backend
 
     {
       video_t::dd_t::config_option_e::disabled,  // configuration_option
@@ -1175,12 +1178,16 @@ namespace config {
     int_f(vars, "vt_software", video.vt.vt_require_sw, vt::force_software_from_view);
     int_f(vars, "vt_realtime", video.vt.vt_realtime, vt::rt_from_view);
 
+    int_between_f(vars, "default_scale_factor", video.default_scale_factor, {20, 200});
+
     bool_f(vars, "vaapi_strict_rc_buffer", video.vaapi.strict_rc_buffer);
+    int_between_f(vars, "vaapi_quality", video.vaapi.quality, {-1, 8});
 
     string_f(vars, "capture", video.capture);
     string_f(vars, "encoder", video.encoder);
     string_f(vars, "adapter_name", video.adapter_name);
     string_f(vars, "output_name", video.output_name);
+    string_restricted_f(vars, "virtual_display_backend", video.virtual_display_backend, {"evdi"sv, "hermes_kms"sv});
 
     generic_f(vars, "dd_configuration_option", video.dd.configuration_option, dd::config_option_from_view);
     generic_f(vars, "dd_resolution_option", video.dd.resolution_option, dd::resolution_option_from_view);
@@ -1374,6 +1381,12 @@ namespace config {
       vars.erase(it);
     }
 
+    vars.erase("clipboardInfo"s);
+    vars.erase("evdiInfo"s);
+    vars.erase("evdiDiagnostic"s);
+    vars.erase("evdiSetupRequired"s);
+    vars.erase("vdisplayStatus"s);
+
     if (sunshine.min_log_level <= 3) {
       for (auto &[var, _] : vars) {
         std::cout << "Warning: Unrecognized configurable option ["sv << var << ']' << std::endl;
@@ -1479,7 +1492,7 @@ namespace config {
     // so that service instance will do the work instead.
 
     if (!config_loaded && !shortcut_launch) {
-      BOOST_LOG(fatal) << "To relaunch Apollo successfully, use the shortcut in the Start Menu. Do not run sunshine.exe manually."sv;
+      BOOST_LOG(fatal) << "To relaunch Hermes successfully, use the shortcut in the Start Menu. Do not run sunshine.exe manually."sv;
       std::this_thread::sleep_for(10s);
 #else
     if (!config_loaded) {

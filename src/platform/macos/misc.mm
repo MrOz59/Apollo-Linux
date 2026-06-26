@@ -16,6 +16,7 @@
 #include <arpa/inet.h>
 #include <dlfcn.h>
 #include <Foundation/Foundation.h>
+#include <AppKit/AppKit.h>
 #include <mach-o/dyld.h>
 #include <net/if_dl.h>
 #include <pwd.h>
@@ -538,14 +539,28 @@ namespace platf {
 
   std::string
   get_clipboard() {
-    // Placeholder
-    return "";
+    @autoreleasepool {
+      NSString *content = [[NSPasteboard generalPasteboard] stringForType:NSPasteboardTypeString];
+      return content == nil ? "" : std::string([content UTF8String]);
+    }
   }
 
   bool
   set_clipboard(const std::string& content) {
-    // Placeholder
-    return false;
+    @autoreleasepool {
+      NSString *text = [[NSString alloc] initWithBytes:content.data() length:content.size() encoding:NSUTF8StringEncoding];
+      if (text == nil) {
+        return false;
+      }
+      NSPasteboard *clipboard = [NSPasteboard generalPasteboard];
+      [clipboard clearContents];
+      return [clipboard setString:text forType:NSPasteboardTypeString];
+    }
+  }
+
+  bool
+  clipboard_available() {
+    return true;
   }
 }  // namespace platf
 

@@ -27,6 +27,7 @@
 #include "src/utility.h"
 #include "src/video.h"
 #include "vaapi.h"
+#include "virtual_display.h"
 #include "wayland.h"
 
 using namespace std::literals;
@@ -35,6 +36,25 @@ namespace fs = std::filesystem;
 namespace platf {
 
   namespace kms {
+
+    // Rolling average of the per-frame capture cost, logged every 120 frames.
+    // Used to compare the Hermes zero-copy ACQUIRE_FRAME against EVDI's CPU
+    // copy_to() under identical conditions. @label distinguishes the backend.
+    inline void accumulate_capture_metric(const char *label, long long ns) {
+      static thread_local long long sum = 0;
+      static thread_local long long peak = 0;
+      static thread_local int count = 0;
+      sum += ns;
+      peak = std::max(peak, ns);
+      if (++count >= 120) {
+        BOOST_LOG(info) << "[capture-metric/" << label << "] avg="
+                        << (sum / count) / 1000.0 << "us peak=" << peak / 1000.0
+                        << "us over " << count << " frames";
+        sum = 0;
+        peak = 0;
+        count = 0;
+      }
+    }
 
     class cap_sys_admin {
     public:
@@ -589,14 +609,30 @@ namespace platf {
       int init(const std::string &display_name, const ::video::config_t &config) {
         delay = std::chrono::nanoseconds {1s} / config.framerate;
 
-        // Handle virtual display names (e.g., "VIRTUAL-80EE83C6")
-        // Virtual displays don't have a physical KMS representation, so we fall back to the primary monitor
+        // EVDI exposes a real DRM card.  Virtual display names identify that
+        // card so we never silently capture the user's primary monitor.
         int monitor_index = 0;
-        if (display_name.rfind("VIRTUAL-", 0) != 0) {
+        std::string virtual_card;
+        constexpr std::string_view virtual_card_prefix {"VIRTUAL-card"};
+        const auto hermes_card_index = VDISPLAY::getHermesKmsCardIndex(display_name);
+        const auto evdi_card_index = VDISPLAY::getEvdiCardIndex(display_name);
+        if (hermes_card_index >= 0) {
+          virtual_card = "card" + std::to_string(hermes_card_index);
+        } else if (evdi_card_index >= 0) {
+          virtual_card = "card" + std::to_string(evdi_card_index);
+        } else if (display_name.rfind(virtual_card_prefix, 0) == 0) {
+          const auto card_index = display_name.substr(virtual_card_prefix.size());
+          if (card_index.empty() || card_index.find_first_not_of("0123456789") != std::string::npos) {
+            BOOST_LOG(error) << "Invalid virtual display name ["sv << display_name << ']';
+            return -1;
+          }
+          virtual_card = "card" + card_index;
+        } else if (display_name.rfind("VIRTUAL-", 0) != 0) {
           // Not a virtual display, parse as numeric index
           monitor_index = util::from_view(display_name);
         } else {
-          BOOST_LOG(debug) << "Virtual display detected ["sv << display_name << "], using primary monitor for KMS capture"sv;
+          BOOST_LOG(error) << "Virtual display ["sv << display_name << "] has no DRM card mapping"sv;
+          return -1;
         }
         int monitor = 0;
 
@@ -608,6 +644,9 @@ namespace platf {
           if (filestring.size() < 4 || std::string_view {filestring}.substr(0, 4) != "card"sv) {
             continue;
           }
+          if (!virtual_card.empty() && filestring != virtual_card) {
+            continue;
+          }
 
           kms::card_t card;
           if (card.init(entry.path().c_str())) {
@@ -616,7 +655,7 @@ namespace platf {
 
           // Skip non-Nvidia cards if we're looking for CUDA devices
           // unless NVENC is selected manually by the user
-          if (mem_type == mem_type_e::cuda && !card.is_nvidia()) {
+          if (virtual_card.empty() && mem_type == mem_type_e::cuda && !card.is_nvidia()) {
             BOOST_LOG(debug) << file << " is not a CUDA device"sv;
             if (config::video.encoder != "nvenc") {
               continue;
@@ -675,9 +714,9 @@ namespace platf {
               return cd.path == filestring;
             });
 
-            if (pos == std::end(card_descriptors)) {
-              // This code path shouldn't happen, but it's there just in case.
-              // card_descriptors is part of the guesswork after all.
+            if (pos == std::end(card_descriptors) && virtual_card.empty()) {
+              // card_descriptors is populated by display enumeration. Physical
+              // displays need it for desktop-coordinate correlation.
               BOOST_LOG(error) << "Couldn't find ["sv << entry.path() << "]: This shouldn't have happened :/"sv;
               return -1;
             }
@@ -694,8 +733,9 @@ namespace platf {
             this->env_width = ::platf::kms::env_width;
             this->env_height = ::platf::kms::env_height;
 
-            auto monitor = pos->crtc_to_monitor.find(plane->crtc_id);
-            if (monitor != std::end(pos->crtc_to_monitor)) {
+            if (pos != std::end(card_descriptors) &&
+                pos->crtc_to_monitor.find(plane->crtc_id) != std::end(pos->crtc_to_monitor)) {
+              auto monitor = pos->crtc_to_monitor.find(plane->crtc_id);
               auto &viewport = monitor->second.viewport;
 
               width = viewport.width;
@@ -717,14 +757,24 @@ namespace platf {
               offset_y = viewport.offset_y;
             }
 
-            // This code path shouldn't happen, but it's there just in case.
-            // crtc_to_monitor is part of the guesswork after all.
+            // The virtual EVDI card can be ready before the asynchronous
+            // global display enumeration has populated card_descriptors. Its
+            // CRTC dimensions are sufficient for capture, so avoid a delayed
+            // retry just to obtain desktop-coordinate metadata.
             else {
-              BOOST_LOG(warning) << "Couldn't find crtc_id, this shouldn't have happened :\\"sv;
+              BOOST_LOG(virtual_card.empty() ? warning : debug)
+                << "Using CRTC geometry because no monitor descriptor is available."sv;
               width = crtc->width;
               height = crtc->height;
               offset_x = crtc->x;
               offset_y = crtc->y;
+              if (!virtual_card.empty()) {
+                // An isolated EVDI display is its own desktop from the
+                // stream's perspective. Keep absolute input coordinates in
+                // that space even before Wayland/KMS correlation completes.
+                this->env_width = width;
+                this->env_height = height;
+              }
             }
 
             plane_id = plane->plane_id;
@@ -1336,6 +1386,93 @@ namespace platf {
       egl::ctx_t ctx;
     };
 
+    // EVDI exposes a virtual DRM card but no render node. Feeding that card to
+    // GBM/EGL can crash Mesa, so capture from libevdi's CPU BGRA buffer and
+    // use Apollo's existing RAM-to-encoder upload path instead.
+    class display_evdi_t: public platf::display_t {
+    public:
+      explicit display_evdi_t(mem_type_e mem_type): mem_type {mem_type} {}
+
+      int init(const std::string &display_name, const ::video::config_t &config) {
+        buffer = VDISPLAY::getEvdiBuffer(display_name);
+        if (!buffer) {
+          BOOST_LOG(error) << "No EVDI pixel buffer is available for " << display_name;
+          return -1;
+        }
+        delay = std::chrono::nanoseconds {1s} / config.framerate;
+        width = static_cast<int>(buffer->width());
+        height = static_cast<int>(buffer->height());
+        offset_x = 0;
+        offset_y = 0;
+        env_width = width;
+        env_height = height;
+        return 0;
+      }
+
+      capture_e capture(const push_captured_image_cb_t &push_captured_image_cb,
+                        const pull_free_image_cb_t &pull_free_image_cb,
+                        bool *) override {
+        auto next_frame = std::chrono::steady_clock::now();
+        auto last_frame = buffer->frame_number();
+
+        while (true) {
+          const auto now = std::chrono::steady_clock::now();
+          if (next_frame > now) {
+            const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(next_frame - now);
+            last_frame = buffer->wait_for_update(last_frame, std::max(remaining, std::chrono::milliseconds {1}));
+          }
+          next_frame += delay;
+          if (next_frame < now) {
+            next_frame = now + delay;
+          }
+
+          std::shared_ptr<platf::img_t> img_out;
+          if (!pull_free_image_cb(img_out)) {
+            return capture_e::interrupted;
+          }
+          const auto t0 = std::chrono::steady_clock::now();
+          buffer->copy_to(img_out->data, img_out->row_pitch);
+          const auto t1 = std::chrono::steady_clock::now();
+          accumulate_capture_metric("evdi", std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count());
+          img_out->frame_timestamp = std::chrono::steady_clock::now();
+          if (!push_captured_image_cb(std::move(img_out), true)) {
+            return capture_e::ok;
+          }
+        }
+      }
+
+      std::unique_ptr<avcodec_encode_device_t> make_avcodec_encode_device(pix_fmt_e) override {
+#ifdef SUNSHINE_BUILD_VAAPI
+        if (mem_type == mem_type_e::vaapi) {
+          return va::make_avcodec_encode_device(width, height, false);
+        }
+#endif
+#ifdef SUNSHINE_BUILD_CUDA
+        if (mem_type == mem_type_e::cuda) {
+          return cuda::make_avcodec_encode_device(width, height, false);
+        }
+#endif
+        return std::make_unique<avcodec_encode_device_t>();
+      }
+
+      std::shared_ptr<img_t> alloc_img() override {
+        auto img = std::make_shared<kms_img_t>();
+        img->width = width;
+        img->height = height;
+        img->pixel_pitch = 4;
+        img->row_pitch = img->pixel_pitch * width;
+        img->data = new std::uint8_t[height * img->row_pitch];
+        return img;
+      }
+
+      int dummy_img(platf::img_t *) override { return 0; }
+
+    private:
+      mem_type_e mem_type;
+      std::chrono::nanoseconds delay;
+      std::shared_ptr<VDISPLAY::EvdiBuffer> buffer;
+    };
+
     class display_vram_t: public display_t {
     public:
       display_vram_t(mem_type_e mem_type):
@@ -1491,17 +1628,252 @@ namespace platf {
       std::uint64_t sequence {};
     };
 
+    // Zero-copy capture of a Hermes-KMS virtual display.
+    //
+    // Unlike the KMS path, this never reads the scanout through drmModeGetFB +
+    // drmPrimeHandleToFD (which needs DRM master and fails while the compositor
+    // owns the card). Instead it opens the Hermes render node and pulls the
+    // current framebuffer as DMA-BUFs via ACQUIRE_FRAME. The descriptor fields
+    // map 1:1 onto egl::surface_descriptor_t, so the encoder path is unchanged.
+    class display_hermes_vram_t: public display_vram_t {
+    public:
+      display_hermes_vram_t(mem_type_e mem_type):
+          display_vram_t(mem_type) {
+      }
+
+      ~display_hermes_vram_t() override {
+        if (hermes_fd >= 0) {
+          ::close(hermes_fd);
+          hermes_fd = -1;
+        }
+      }
+
+      int init(const std::string &display_name, const ::video::config_t &config) {
+        BOOST_LOG(info) << "Hermes-KMS zero-copy capture path selected for ["sv << display_name << ']';
+        delay = std::chrono::nanoseconds {1s} / config.framerate;
+
+        const int card_index = VDISPLAY::getHermesKmsCardIndex(display_name);
+        if (card_index < 0) {
+          BOOST_LOG(error) << "Hermes-KMS capture: no DRM card for ["sv << display_name << ']';
+          return -1;
+        }
+
+        // Open the card for its render node (used by the VAAPI encoder). We do
+        // not take DRM master or touch KMS objects here.
+        const std::string card_path = "/dev/dri/card" + std::to_string(card_index);
+        if (card.init(card_path.c_str())) {
+          BOOST_LOG(error) << "Hermes-KMS capture: could not open "sv << card_path;
+          return -1;
+        }
+
+        hermes_fd = VDISPLAY::hermesKmsOpenCapture(display_name);
+        if (hermes_fd < 0) {
+          return -1;
+        }
+
+        int w = 0;
+        int h = 0;
+        if (!VDISPLAY::hermesKmsCaptureSize(hermes_fd, w, h) || w <= 0 || h <= 0) {
+          BOOST_LOG(error) << "Hermes-KMS capture: no active scanout geometry yet."sv;
+          return -1;
+        }
+
+        width = img_width = w;
+        height = img_height = h;
+        img_offset_x = 0;
+        img_offset_y = 0;
+        env_width = w;
+        env_height = h;
+
+        // The Hermes render node only exports DMA-BUFs; it is not a render GPU,
+        // so VAAPI must run on a real GPU (e.g. amdgpu/renderD128). Find the
+        // first render node that is not Hermes and validate VAAPI there.
+        encode_render_fd.el = open_real_render_node();
+        if (encode_render_fd.el < 0) {
+          BOOST_LOG(error) << "Hermes-KMS capture: no render GPU found for encoding."sv;
+          return -1;
+        }
+
+#ifdef SUNSHINE_BUILD_VAAPI
+        if (mem_type == mem_type_e::vaapi && !va::validate(encode_render_fd.el)) {
+          BOOST_LOG(warning) << "Encoding GPU doesn't support VAAPI."sv;
+          return -1;
+        }
+#endif
+
+        BOOST_LOG(info) << "Hermes-KMS zero-copy capture ready: "sv << w << 'x' << h;
+        return 0;
+      }
+
+      // Open the render node of a real GPU (not the Hermes virtual device),
+      // used to import the captured DMA-BUFs and run the encoder.
+      static int open_real_render_node() {
+        drmDevice *devices[16];
+        const int n = drmGetDevices2(0, devices, 16);
+        if (n <= 0) {
+          return -1;
+        }
+        int fd = -1;
+        for (int i = 0; i < n; ++i) {
+          if (!(devices[i]->available_nodes & (1 << DRM_NODE_RENDER))) {
+            continue;
+          }
+          const char *node = devices[i]->nodes[DRM_NODE_RENDER];
+          const int candidate = open(node, O_RDWR | O_CLOEXEC);
+          if (candidate < 0) {
+            continue;
+          }
+          // Reject the Hermes render node: it has no rendering capability.
+          drmVersionPtr ver = drmGetVersion(candidate);
+          const bool is_hermes = ver && ver->name && std::string_view {ver->name} == "hermes-kms"sv;
+          if (ver) {
+            drmFreeVersion(ver);
+          }
+          if (is_hermes) {
+            close(candidate);
+            continue;
+          }
+          fd = candidate;
+          break;
+        }
+        drmFreeDevices(devices, n);
+        return fd;
+      }
+
+      std::unique_ptr<avcodec_encode_device_t> make_avcodec_encode_device(pix_fmt_e pix_fmt) override {
+#ifdef SUNSHINE_BUILD_VAAPI
+        if (mem_type == mem_type_e::vaapi) {
+          // Encode on the real GPU, importing the Hermes DMA-BUFs (vram=true).
+          return va::make_avcodec_encode_device(width, height, dup(encode_render_fd.el), img_offset_x, img_offset_y, true);
+        }
+#endif
+        BOOST_LOG(error) << "Hermes-KMS capture only supports VAAPI encoding."sv;
+        return nullptr;
+      }
+
+      capture_e snapshot(const pull_free_image_cb_t &pull_free_image_cb, std::shared_ptr<platf::img_t> &img_out, std::chrono::milliseconds timeout, bool /* cursor */) {
+        if (!pull_free_image_cb(img_out)) {
+          return platf::capture_e::interrupted;
+        }
+        auto img = (egl::img_descriptor_t *) img_out.get();
+        img->reset();
+
+        VDISPLAY::HermesKmsFrame frame;
+        const auto timeout_ms = static_cast<uint32_t>(std::max<std::chrono::milliseconds::rep>(1, timeout.count()));
+        if (!VDISPLAY::hermesKmsAcquireFrame(hermes_fd, last_sequence, timeout_ms, frame)) {
+          // No new frame within the timeout: emit the previous image unchanged.
+          return platf::capture_e::timeout;
+        }
+        // Measure only the ACQUIRE_FRAME cost (DMA-BUF export), excluding the
+        // blocking wait for a new frame, to compare fairly against EVDI's
+        // copy_to() which likewise excludes its wait_for_update().
+        accumulate_capture_metric("hermes-kms", frame.acquire_ns);
+
+        if (frame.width != img_width || frame.height != img_height) {
+          frame.close();
+          return platf::capture_e::reinit;
+        }
+
+        // Hand the DMA-BUFs to EGL/VAAPI through the surface descriptor.
+        img->sd.width = frame.width;
+        img->sd.height = frame.height;
+        img->sd.fourcc = frame.fourcc;
+        img->sd.modifier = frame.modifier;
+        for (int i = 0; i < 4; ++i) {
+          img->sd.fds[i] = frame.dma_buf_fd[i];
+          img->sd.offsets[i] = frame.offset[i];
+          img->sd.pitches[i] = frame.pitch[i];
+        }
+        // The sync_file fence is satisfied by the compositor's commit; the
+        // VAAPI import waits on the buffer implicitly, so just release it.
+        if (frame.sync_file_fd >= 0) {
+          ::close(frame.sync_file_fd);
+          frame.sync_file_fd = -1;
+        }
+
+        last_sequence = frame.sequence;
+        img->sequence = ++sequence;
+        img->frame_timestamp = std::chrono::steady_clock::now();
+        img->data = nullptr;  // No separate cursor overlay: the compositor bakes it in.
+
+        // The descriptor now owns the dma-buf fds; EGL import dups them, and the
+        // image holds them until reuse. Close happens when the image is reset.
+        for (int i = 0; i < 4; ++i) {
+          frame.dma_buf_fd[i] = -1;  // ownership transferred to img->sd
+        }
+        return platf::capture_e::ok;
+      }
+
+      capture_e capture(const push_captured_image_cb_t &push_captured_image_cb, const pull_free_image_cb_t &pull_free_image_cb, bool *cursor) {
+        while (true) {
+          std::shared_ptr<platf::img_t> img_out;
+          auto status = snapshot(pull_free_image_cb, img_out, 200ms, *cursor);
+          switch (status) {
+            case platf::capture_e::reinit:
+            case platf::capture_e::error:
+            case platf::capture_e::interrupted:
+              return status;
+            case platf::capture_e::timeout:
+              if (!push_captured_image_cb(std::move(img_out), false)) {
+                return platf::capture_e::ok;
+              }
+              break;
+            case platf::capture_e::ok:
+              if (!push_captured_image_cb(std::move(img_out), true)) {
+                return platf::capture_e::ok;
+              }
+              break;
+            default:
+              BOOST_LOG(error) << "Unrecognized capture status ["sv << (int) status << ']';
+              return status;
+          }
+        }
+        return capture_e::ok;
+      }
+
+      int hermes_fd {-1};
+      file_t encode_render_fd;
+      uint64_t last_sequence {0};
+    };
+
   }  // namespace kms
 
   std::shared_ptr<display_t> kms_display(mem_type_e hwdevice_type, const std::string &display_name, const ::video::config_t &config) {
+    const bool hermes_kms_display = VDISPLAY::isHermesKmsDisplay(display_name);
+    if (VDISPLAY::isEvdiDisplay(display_name)) {
+      auto display = std::make_shared<kms::display_evdi_t>(hwdevice_type);
+      return display->init(display_name, config) ? nullptr : display;
+    }
+
+    // Hermes-KMS streams zero-copy through its render node (ACQUIRE_FRAME),
+    // never through KMS, so the compositor keeps DRM master and scans out the
+    // desktop. Use the dedicated capture path and never fall back to a KMS
+    // card, which would stream a physical monitor.
+    if (hermes_kms_display) {
+      if (hwdevice_type != mem_type_e::vaapi) {
+        BOOST_LOG(error) << "Hermes-KMS capture requires VAAPI zero-copy; "sv
+                         << "the selected encoder is not supported."sv;
+        return nullptr;
+      }
+      auto disp = std::make_shared<kms::display_hermes_vram_t>(hwdevice_type);
+      if (!disp->init(display_name, config)) {
+        return disp;
+      }
+      BOOST_LOG(error) << "Hermes-KMS zero-copy capture failed; refusing physical-display fallback."sv;
+      return nullptr;
+    }
+
     if (hwdevice_type == mem_type_e::vaapi || hwdevice_type == mem_type_e::cuda) {
       auto disp = std::make_shared<kms::display_vram_t>(hwdevice_type);
 
       if (!disp->init(display_name, config)) {
         return disp;
       }
+    }
 
-      // In the case of failure, attempt the old method for VAAPI
+    if (hermes_kms_display) {
+      BOOST_LOG(error) << "Hermes-KMS RAM capture is not supported; no active scanout framebuffer was found."sv;
+      return nullptr;
     }
 
     auto disp = std::make_shared<kms::display_ram_t>(hwdevice_type);

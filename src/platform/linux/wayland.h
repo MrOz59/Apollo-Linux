@@ -9,6 +9,7 @@
 
 #ifdef SUNSHINE_BUILD_WAYLAND
   #include <linux-dmabuf-unstable-v1.h>
+  #include <wlr-output-management-unstable-v1.h>
   #include <wlr-screencopy-unstable-v1.h>
   #include <xdg-output-unstable-v1.h>
 #endif
@@ -199,6 +200,16 @@ namespace wl {
   };
 
   std::vector<std::unique_ptr<monitor_t>> monitors(const char *display_name = nullptr);
+  /**
+   * Configure a virtual output through wlroots' output-management protocol.
+   * Returns false when the compositor does not expose that protocol or rejects
+   * the requested layout.
+   */
+  bool configure_virtual_output(const std::string &output_name, int width, int height, int refresh_rate, bool exclusive);
+  /** Restore the physical output layout saved by configure_virtual_output(). */
+  bool restore_virtual_output_layout();
+  /** Check whether the current compositor exposes wlroots output management. */
+  bool output_management_supported();
   int init();
 }  // namespace wl
 #else
@@ -230,6 +241,18 @@ namespace wl {
 
   inline int init() {
     return -1;
+  }
+
+  inline bool configure_virtual_output(const std::string &, int, int, int, bool) {
+    return false;
+  }
+
+  inline bool restore_virtual_output_layout() {
+    return false;
+  }
+
+  inline bool output_management_supported() {
+    return false;
   }
 }  // namespace wl
 #endif

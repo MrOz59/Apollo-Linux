@@ -30,6 +30,7 @@ namespace config {
     int av1_mode;
 
     int min_threads;  // Minimum number of threads/slices for CPU encoding
+    int default_scale_factor;  // Host-side default resolution scale factor in percent; 100 = unchanged.
 
     struct {
       std::string sw_preset;
@@ -81,12 +82,14 @@ namespace config {
 
     struct {
       bool strict_rc_buffer;
+      int quality;  // ffmpeg VAAPI quality option, -1 = leave codec default.
     } vaapi;
 
     std::string capture;
     std::string encoder;
     std::string adapter_name;
     std::string output_name;
+    std::string virtual_display_backend;
 
     struct dd_t {
       struct workarounds_t {

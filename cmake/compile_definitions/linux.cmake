@@ -72,12 +72,10 @@ if(CUDA_FOUND)
     add_compile_definitions(SUNSHINE_BUILD_CUDA)
 endif()
 
-# libdrm is required for both DRM (KMS) and Wayland
-if(${SUNSHINE_ENABLE_DRM} OR ${SUNSHINE_ENABLE_WAYLAND})
-    find_package(LIBDRM REQUIRED)
-else()
-    set(LIBDRM_FOUND OFF)
-endif()
+# libdrm is required by KMS, Wayland, and the EVDI virtual-display backend.
+# The backend is compiled unconditionally on Linux, so keep this dependency
+# available even in minimal builds with the KMS and Wayland capture options off.
+find_package(LIBDRM REQUIRED)
 if(LIBDRM_FOUND)
     include_directories(SYSTEM ${LIBDRM_INCLUDE_DIRS})
     list(APPEND PLATFORM_LIBRARIES ${LIBDRM_LIBRARIES})
@@ -135,6 +133,7 @@ if(WAYLAND_FOUND)
     GEN_WAYLAND("${WAYLAND_PROTOCOLS_DIR}" "unstable/xdg-output" xdg-output-unstable-v1)
     GEN_WAYLAND("${WAYLAND_PROTOCOLS_DIR}" "unstable/linux-dmabuf" linux-dmabuf-unstable-v1)
     GEN_WAYLAND("${CMAKE_SOURCE_DIR}/third-party/wlr-protocols" "unstable" wlr-screencopy-unstable-v1)
+    GEN_WAYLAND("${CMAKE_SOURCE_DIR}/third-party/wlr-protocols" "unstable" wlr-output-management-unstable-v1)
 
     include_directories(
             SYSTEM

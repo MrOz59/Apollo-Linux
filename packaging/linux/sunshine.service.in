@@ -8,6 +8,7 @@ StartLimitBurst=5
 ExecStartPre=/bin/sleep 5
 @SUNSHINE_SERVICE_START_COMMAND@
 @SUNSHINE_SERVICE_STOP_COMMAND@
+ExecStopPost=-/usr/bin/apollo-monitor-recovery
 Restart=on-failure
 RestartSec=5s
 

@@ -10,9 +10,27 @@ do_udev_reload() {
     modprobe uhid || true
 }
 
+fix_asset_permissions() {
+    # pacman preserves existing directory modes on upgrade. Keep packaged
+    # assets system-owned and non-writable after replacing older local builds.
+    chown -R root:root /usr/share/apollo
+    find /usr/share/apollo -type d -exec chmod 755 {} +
+    find /usr/share/apollo -type f -exec chmod 644 {} +
+}
+
 load_evdi() {
     # Carregar módulo EVDI para virtual display
-    modprobe evdi || true
+    echo "options evdi initial_device_count=1" > /etc/modprobe.d/apollo-evdi.conf
+    modprobe -r evdi 2>/dev/null || true
+    if ! modprobe evdi; then
+        echo "==> AVISO: o módulo EVDI não pôde ser carregado." >&2
+        echo "==> Displays virtuais permanecerão desativados até o EVDI ser corrigido." >&2
+        echo "==> Execute: dkms status" >&2
+        echo "==> Depois de atualizar um EVDI compatível com seu kernel, execute:" >&2
+        echo "==>   sudo dkms autoinstall -k \$(uname -r)" >&2
+        echo "==>   sudo modprobe evdi" >&2
+        return 1
+    fi
     
     # Adicionar ao carregamento automático no boot
     if [ ! -f /etc/modules-load.d/evdi.conf ]; then
@@ -23,7 +41,12 @@ load_evdi() {
 post_install() {
     do_setcap
     do_udev_reload
-    load_evdi
+    fix_asset_permissions
+    if ! load_evdi; then
+        echo "==> Apollo foi instalado, mas o display virtual EVDI não está pronto." >&2
+        echo "==> Abra Audio/Video no Apollo para ver o diagnóstico e os próximos passos." >&2
+        return 0
+    fi
     
     echo ""
     echo "╔══════════════════════════════════════════════════════════╗"
@@ -41,7 +64,12 @@ post_install() {
 post_upgrade() {
     do_setcap
     do_udev_reload
-    load_evdi
+    fix_asset_permissions
+    if ! load_evdi; then
+        echo "==> Apollo foi atualizado, mas o display virtual EVDI não está pronto." >&2
+        echo "==> Abra Audio/Video no Apollo para ver o diagnóstico e os próximos passos." >&2
+        return 0
+    fi
     
     echo ""
     echo "==> Apollo atualizado com sucesso!"
@@ -53,4 +81,5 @@ pre_remove() {
     if [ -f /etc/modules-load.d/evdi.conf ]; then
         rm -f /etc/modules-load.d/evdi.conf
     fi
+    rm -f /etc/modprobe.d/apollo-evdi.conf
 }

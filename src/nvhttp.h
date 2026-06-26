@@ -9,6 +9,7 @@
 #include <string>
 #include <chrono>
 #include <list>
+#include <optional>
 
 // lib includes
 #include <boost/property_tree/ptree.hpp>
@@ -78,6 +79,33 @@ namespace nvhttp {
    * @param cert
    */
   void setup(const std::string &pkey, const std::string &cert);
+
+  /**
+   * @brief Verify a TLS client certificate against the paired-client store.
+   * @param certificate The peer certificate obtained from a TLS connection.
+   * @param named_cert_out The paired-client record when verification succeeds.
+   * @return True when the certificate belongs to a paired client.
+   */
+  bool verify_paired_client_certificate(X509 *certificate, crypto::p_named_cert_t &named_cert_out);
+
+  struct hestia_session_prepare_t {
+    bool virtual_display = false;
+    int width = 0;
+    int height = 0;
+    int fps = 0;
+    bool hdr = false;
+    uint32_t scale_factor = 100;
+    std::string launch_mode = "normal";
+  };
+
+  /** Store preparation hints for a paired client's next GameStream launch. */
+  void store_hestia_session_prepare(const std::string &client_uuid, hestia_session_prepare_t prepare);
+
+  /** Consume unexpired preparation hints for a paired client's next launch. */
+  std::optional<hestia_session_prepare_t> take_hestia_session_prepare(const std::string &client_uuid);
+
+  /** Remove any unconsumed preparation hints for a paired client. */
+  void clear_hestia_session_prepare(const std::string &client_uuid);
 
   class SunshineHTTPS: public SimpleWeb::HTTPS {
   public:

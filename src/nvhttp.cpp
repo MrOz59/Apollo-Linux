@@ -8,7 +8,9 @@
 // standard includes
 #include <filesystem>
 #include <format>
+#include <mutex>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <string>
 
@@ -150,6 +152,13 @@ namespace nvhttp {
   std::unordered_map<std::string, pair_session_t> map_id_sess;
   client_t client_root;
   std::atomic<uint32_t> session_id_counter;
+
+  struct pending_hestia_session_prepare_t {
+    hestia_session_prepare_t prepare;
+    std::chrono::steady_clock::time_point expires_at;
+  };
+  static std::mutex pending_hestia_session_prepares_mutex;
+  static std::unordered_map<std::string, pending_hestia_session_prepare_t> pending_hestia_session_prepares;
 
   using resp_https_t = std::shared_ptr<typename SimpleWeb::ServerBase<SunshineHTTPS>::Response>;
   using req_https_t = std::shared_ptr<typename SimpleWeb::ServerBase<SunshineHTTPS>::Request>;
@@ -451,7 +460,7 @@ namespace nvhttp {
       launch_session->fps = 60000; // 60fps * 1000 denominator
     }
 
-    launch_session->device_name = named_cert_p->name.empty() ? "ApolloDisplay"s : named_cert_p->name;
+    launch_session->device_name = named_cert_p->name.empty() ? "HermesDisplay"s : named_cert_p->name;
     launch_session->unique_id = named_cert_p->uuid;
     launch_session->perm = named_cert_p->perm;
     launch_session->enable_sops = util::from_view(get_arg(args, "sops", "0"));
@@ -461,6 +470,7 @@ namespace nvhttp {
     launch_session->enable_hdr = util::from_view(get_arg(args, "hdrMode", "0"));
     launch_session->virtual_display = util::from_view(get_arg(args, "virtualDisplay", "0")) || named_cert_p->always_use_virtual_display;
     launch_session->scale_factor = util::from_view(get_arg(args, "scaleFactor", "100"));
+    launch_session->launch_mode = "normal";
 
     launch_session->client_do_cmds = named_cert_p->do_cmds;
     launch_session->client_undo_cmds = named_cert_p->undo_cmds;
@@ -1239,6 +1249,21 @@ namespace nvhttp {
 
     host_audio = util::from_view(get_arg(args, "localAudioPlayMode"));
     auto launch_session = make_launch_session(host_audio, is_input_only, args, named_cert_p);
+    if (!is_input_only) {
+      if (const auto hestia_prepare = take_hestia_session_prepare(named_cert_p->uuid)) {
+        launch_session->width = hestia_prepare->width;
+        launch_session->height = hestia_prepare->height;
+        launch_session->fps = hestia_prepare->fps * 1000;
+        launch_session->enable_hdr = hestia_prepare->hdr;
+        launch_session->virtual_display = hestia_prepare->virtual_display;
+        launch_session->scale_factor = hestia_prepare->scale_factor;
+        launch_session->launch_mode = hestia_prepare->launch_mode;
+        BOOST_LOG(info) << "[HestiaAPI] applying prepared session for client " << named_cert_p->uuid
+                        << ": " << launch_session->width << 'x' << launch_session->height
+                        << '@' << hestia_prepare->fps << "Hz virtual_display=" << launch_session->virtual_display
+                        << " launch_mode=" << launch_session->launch_mode;
+      }
+    }
 
     auto encryption_mode = net::encryption_mode_for_address(request->remote_endpoint().address());
     if (!launch_session->rtsp_cipher && encryption_mode == config::ENCRYPTION_MODE_MANDATORY) {
@@ -1631,6 +1656,40 @@ namespace nvhttp {
   void setup(const std::string &pkey, const std::string &cert) {
     conf_intern.pkey = pkey;
     conf_intern.servercert = cert;
+  }
+
+  bool verify_paired_client_certificate(X509 *certificate, crypto::p_named_cert_t &named_cert_out) {
+    return certificate != nullptr && cert_chain.verify(certificate, named_cert_out) == nullptr;
+  }
+
+  void store_hestia_session_prepare(const std::string &client_uuid, hestia_session_prepare_t prepare) {
+    std::lock_guard lock(pending_hestia_session_prepares_mutex);
+    pending_hestia_session_prepares[client_uuid] = {
+      .prepare = std::move(prepare),
+      .expires_at = std::chrono::steady_clock::now() + 60s,
+    };
+  }
+
+  std::optional<hestia_session_prepare_t> take_hestia_session_prepare(const std::string &client_uuid) {
+    std::lock_guard lock(pending_hestia_session_prepares_mutex);
+    const auto it = pending_hestia_session_prepares.find(client_uuid);
+    if (it == pending_hestia_session_prepares.end()) {
+      return std::nullopt;
+    }
+
+    if (it->second.expires_at < std::chrono::steady_clock::now()) {
+      pending_hestia_session_prepares.erase(it);
+      return std::nullopt;
+    }
+
+    auto prepare = std::move(it->second.prepare);
+    pending_hestia_session_prepares.erase(it);
+    return prepare;
+  }
+
+  void clear_hestia_session_prepare(const std::string &client_uuid) {
+    std::lock_guard lock(pending_hestia_session_prepares_mutex);
+    pending_hestia_session_prepares.erase(client_uuid);
   }
 
   void start() {
