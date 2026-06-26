@@ -2,7 +2,14 @@
 
 Hermes is an Apollo-derived Linux game-streaming host focused on making
 Moonlight/Hestia streaming less manual and more reliable on CachyOS/Arch,
-especially with real virtual displays through EVDI.
+with low-latency real virtual displays through Hermes-KMS.
+
+Hermes-KMS is a purpose-built DRM/KMS virtual display driver that streams the
+compositor's scanout straight into the hardware encoder as a DMA-BUF, with no
+CPU readback. It is the default backend because it avoids the GPU→RAM→GPU copy
+that EVDI does, which lowers latency. EVDI is still fully supported and can be
+selected at any time — both backends work. (Capture cost at 720p: ~8 us/frame on
+Hermes-KMS vs ~180 us/frame for EVDI, and constant regardless of resolution.)
 
 Hermes keeps compatibility with Apollo, Sunshine, Moonlight, and Hestia. The
 normal GameStream/Sunshine flow remains the fallback path, while Hestia can use
@@ -10,11 +17,13 @@ Hermes protocol extensions when the host reports support for them.
 
 ## Current focus
 
-- Create and activate a real virtual display first, using EVDI or another
-  compatible virtual-display backend.
+- Create and activate a real virtual display. Hermes-KMS is the default for
+  its lower latency; EVDI is a fully supported alternative and the automatic
+  choice where Hermes-KMS is unavailable.
 - Use KDE/KScreen or Wayland output-management integration to make the
   compositor actually render into the virtual display.
-- Avoid falling back silently to the physical monitor when EVDI setup fails.
+- Avoid falling back silently to the physical monitor when virtual-display
+  setup fails.
 - Report missing host dependencies and diagnostics clearly.
 - Keep Gamescope optional. Gamescope is useful for a SteamOS-like session, but
   Hermes should only use it when enabled by app configuration, settings, or an
@@ -44,15 +53,37 @@ Moonlight/Apollo/Sunshine flow.
 ## Virtual display behavior
 
 Hermes tries to create and connect a virtual display for virtual-display
-sessions before launching the configured app. On Linux/KDE Wayland, this depends
-on:
+sessions before launching the configured app, selected by the
+`virtual_display_backend` setting (`hermes_kms` or `evdi`).
+
+### Hermes-KMS (preferred, zero-copy)
+
+The compositor owns the virtual card and scans out the desktop; Hermes opens the
+Hermes-KMS render node and pulls each frame as a DMA-BUF, which a real GPU
+imports and encodes. On Linux/KDE Wayland this depends on:
+
+- the `hermes_kms` kernel module loaded with `initial_enabled=1` (so the
+  compositor adopts the `HERMES-1` output), and its card left on the active seat;
+- `kscreen-doctor` (KWin) or a Wayland output-management protocol to enable the
+  virtual output;
+- a real GPU render node (e.g. amdgpu) for VAAPI encoding;
+- a session where the Hermes process can access the user compositor environment.
+
+See the Hermes-KMS driver repository for module build, udev, and the
+zero-copy validation tooling.
+
+### EVDI (supported alternative)
+
+EVDI remains a fully supported backend — set `virtual_display_backend = evdi`
+to use it, or Hermes selects it automatically when Hermes-KMS is unavailable. It
+depends on:
 
 - `evdi` / `evdi-dkms`
 - `libevdi`
 - `kscreen-doctor`
 - a session where the Hermes process can access the user compositor environment
 
-Gamescope is not required for the normal EVDI virtual-display path. If installed,
+Gamescope is not required for either virtual-display path. If installed,
 Hermes exposes an optional `Gamescope Steam Session` app entry that runs Steam
 Big Picture inside Gamescope on top of the virtual display.
 
@@ -77,9 +108,9 @@ Install the generated package with:
 sudo pacman -U ./apollo-*.pkg.tar.zst
 ```
 
-The package is still named `apollo` for compatibility with the existing Apollo
-service/config paths. Renaming package IDs, binary names, and config paths is a
-separate compatibility decision.
+The installed binary is `hermes`. The package and config paths are still named
+`apollo`/`sunshine` for compatibility with existing service/config layouts;
+renaming package IDs and config paths is a separate compatibility decision.
 
 ## Credits
 
@@ -100,4 +131,4 @@ Hermes builds on work from:
 
 Reference fork:
 
-- https://github.com/Sgtmetalmex/Apollo-CachyOS
+- <https://github.com/Sgtmetalmex/Apollo-CachyOS>
