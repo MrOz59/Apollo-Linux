@@ -35,8 +35,8 @@
         {
             platform: 'Desktop',
             icon: 'fa-solid fa-desktop',
-            name: 'Coming soon...',
-            link: ''
+            name: 'Hestia',
+            link: 'https://github.com/MrOz59/Hestia'
         }
     ]
 
