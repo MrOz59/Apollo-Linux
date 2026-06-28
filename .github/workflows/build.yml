@@ -16,9 +16,14 @@ jobs:
   # ===========================================
   # Windows Build
   # ===========================================
+  # Temporarily disabled: Hermes targets Linux hosts, and the Windows build
+  # currently fails on a pre-existing Boost.Process v1 inline-namespace
+  # incompatibility with the MSYS2 GCC toolchain (unrelated to Hermes). Set
+  # `if: false` to skip rather than fail the run; remove to re-enable.
   build-windows:
+    if: false
     runs-on: windows-latest
-    
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -551,7 +556,7 @@ jobs:
   # ===========================================
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [build-windows, build-linux-appimage, build-deb, build-arch-pkg, build-rpm]
+    needs: [build-linux-appimage, build-deb, build-arch-pkg, build-rpm]
     runs-on: ubuntu-latest
     permissions:
       contents: write
