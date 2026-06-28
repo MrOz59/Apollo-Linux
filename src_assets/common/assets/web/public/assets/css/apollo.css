@@ -76,13 +76,28 @@
     --bs-navbar-brand-hover-color: #ffffff;
     --bs-navbar-toggler-border-color: rgba(255, 255, 255, 0.25);
 }
+/*
+ * Force white-ish text for everything in the navbar. Use !important and an
+ * explicit element list because Bootstrap's compiled navbar rules (and the
+ * scoped Navbar component CSS) are more specific than the variable defaults
+ * above and would otherwise keep the links dark on the violet background.
+ */
 .navbar-background .navbar-brand,
-.navbar-background .nav-link {
-    color: var(--bs-navbar-color);
+.navbar-background .nav-link,
+.navbar-background .nav-link i,
+.navbar-background .dropdown-toggle,
+.navbar-background .navbar-text {
+    color: #ffffff !important;
 }
 .navbar-background .nav-link:hover,
-.navbar-background .nav-link:focus {
-    color: var(--bs-navbar-hover-color);
+.navbar-background .nav-link:focus,
+.navbar-background .navbar-brand:hover {
+    color: #ffffff !important;
+    opacity: 0.85;
+}
+/* Dropdown menu items (e.g. Theme) stay readable on their own light panel. */
+.navbar-background .dropdown-menu .dropdown-item {
+    color: inherit;
 }
 
 [data-bs-theme=dark] .element {
