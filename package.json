@@ -1,6 +1,6 @@
 {
-  "name": "sunshine",
-  "version": "0.0.0",
+  "name": "hermes",
+  "version": "0.1.0",
   "scripts": {
     "build": "vite build --debug",
     "build-clean": "vite build --debug --emptyOutDir",

@@ -4,9 +4,14 @@ cmake_minimum_required(VERSION 3.20)
 # `cmake_path(CONVERT ... TO_NATIVE_PATH_LIST ...)` requires 3.20
 # todo - set this conditionally
 
-project(Hermes VERSION 0.0.0
+# Single source of truth for the Hermes version: the top-level VERSION file.
+# Bump it (or run scripts/bump-version.sh) to change the version everywhere.
+file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/VERSION" HERMES_VERSION)
+string(STRIP "${HERMES_VERSION}" HERMES_VERSION)
+
+project(Hermes VERSION ${HERMES_VERSION}
         DESCRIPTION "Self-hosted game stream host for Artemis"
-        HOMEPAGE_URL "https://github.com/ClassicOldSong/Apollo")
+        HOMEPAGE_URL "https://github.com/MrOz59/Hermes")
 
 set(PROJECT_LICENSE "GPL-3.0-only")
 

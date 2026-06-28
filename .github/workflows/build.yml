@@ -345,7 +345,7 @@ jobs:
 
       - name: Create DEB Package
         run: |
-          VERSION="0.1.0"
+          VERSION="$(cat VERSION)"
           PKGDIR="apollo_${VERSION}_amd64"
           
           mkdir -p ${PKGDIR}/DEBIAN
@@ -499,7 +499,7 @@ jobs:
 
       - name: Create RPM Package
         run: |
-          VERSION="0.1.0"
+          VERSION="$(cat VERSION)"
           mkdir -p ~/rpmbuild/{BUILD,RPMS,SOURCES,SPECS,SRPMS}
           
           # Create tarball for RPM
@@ -510,13 +510,13 @@ jobs:
           cp -r build/assets/* apollo-${VERSION}/usr/share/apollo/ 2>/dev/null || true
           tar -czvf ~/rpmbuild/SOURCES/apollo-${VERSION}.tar.gz apollo-${VERSION}
           
-          cat > ~/rpmbuild/SPECS/apollo.spec << 'EOF'
+          cat > ~/rpmbuild/SPECS/apollo.spec << EOF
           Name:           apollo
-          Version:        0.1.0
+          Version:        ${VERSION}
           Release:        1%{?dist}
           Summary:        Self-hosted game stream host with Linux virtual display support
           License:        GPLv3
-          URL:            https://github.com/MrOz59/Apollo-Linux
+          URL:            https://github.com/MrOz59/Hermes
           Source0:        apollo-%{version}.tar.gz
 
           %description
@@ -578,5 +578,61 @@ jobs:
           draft: false
           prerelease: false
           generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ===========================================
+  # Nightly Release (rolling prerelease on main)
+  # ===========================================
+  # Every successful push to main refreshes the single "nightly" prerelease
+  # with the latest Linux artifacts. The tag is force-moved to the current
+  # commit so the release always points at the newest build.
+  nightly:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [build-linux-appimage, build-deb, build-arch-pkg, build-rpm]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Read version
+        id: version
+        run: echo "version=$(cat VERSION)" >> "$GITHUB_OUTPUT"
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts/
+
+      - name: List artifacts
+        run: find artifacts/ -type f
+
+      - name: Move nightly tag to current commit
+        run: |
+          git tag -f nightly "${GITHUB_SHA}"
+          git push -f origin "refs/tags/nightly"
+
+      - name: Publish nightly release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: nightly
+          name: "Hermes nightly (v${{ steps.version.outputs.version }})"
+          body: |
+            Rolling nightly build of Hermes from the `main` branch.
+
+            - Version: `v${{ steps.version.outputs.version }}`
+            - Commit: ${{ github.sha }}
+            - Built: ${{ github.event.head_commit.timestamp }}
+
+            > These artifacts are automatically rebuilt on every push to
+            > `main` and may be unstable. For tagged releases see the
+            > non-prerelease entries.
+          files: |
+            artifacts/**/*
+          draft: false
+          prerelease: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
