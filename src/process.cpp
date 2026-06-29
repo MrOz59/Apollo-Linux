@@ -238,11 +238,27 @@ namespace proc {
       }
     }
 
+    // In a standalone Gamescope session (e.g. SteamOS Game Mode), Gamescope is
+    // itself the compositor and already provides an isolated, client-sized
+    // surface on DRM/KMS. Creating a Hermes virtual display there is both
+    // redundant and unactivatable (there's no desktop output-management to
+    // adopt the connector), so we skip virtual-display creation and capture the
+    // Gamescope output directly via the normal (non-virtual) capture path.
+    const auto session_env = platf::detect_session_environment();
+    const bool gamescope_session = session_env.kind == platf::session_environment_e::gamescope_session;
+    if (gamescope_session) {
+      BOOST_LOG(info) << "Gamescope session detected; capturing the Gamescope output directly "
+                         "instead of creating a virtual display.";
+      launch_session->virtual_display = false;
+    }
+
     if (
-      config::video.headless_mode        // Headless mode
-      || launch_session->virtual_display // User requested virtual display
-      || _app.virtual_display            // App is configured to use virtual display
-      || !video::allow_encoder_probing() // No active display presents
+      !gamescope_session &&                 // Not in a standalone Gamescope session
+      (config::video.headless_mode        // Headless mode
+       || launch_session->virtual_display // User requested virtual display
+       || _app.virtual_display            // App is configured to use virtual display
+       || !video::allow_encoder_probing() // No active display presents
+      )
     ) {
       if (vDisplayDriverStatus != VDISPLAY::DRIVER_STATUS::OK) {
         // Try init driver again
@@ -556,21 +572,28 @@ namespace proc {
 #ifdef _WIN32
         BOOST_LOG(warning) << "Gamescope launch mode is only available on Linux; using the configured application command";
 #else
-        if (boost::process::v1::search_path("gamescope").empty()) {
+        if (gamescope_session) {
+          // We are already inside a standalone Gamescope session (SteamOS Game
+          // Mode). Nesting another Gamescope here would be redundant, so run the
+          // application directly in the existing session.
+          BOOST_LOG(info) << "Gamescope launch mode requested inside an existing Gamescope session; "
+                             "running the application directly.";
+        } else if (boost::process::v1::search_path("gamescope").empty()) {
           BOOST_LOG(error) << "Gamescope launch mode was requested, but gamescope is not available in PATH";
           return -1;
+        } else {
+          const int gamescope_fps = std::max(1, (launch_session->fps ? launch_session->fps : 60000) / 1000);
+          // This path is only used when a client explicitly requested Gamescope
+          // on a desktop session. The primary session path above has already
+          // created/activated the virtual display, so Gamescope is nested on the
+          // virtual display instead of replacing it.
+          launch_command = std::format("gamescope --backend=wayland -W {} -H {} -r {} -o {} -f -e -F fsr --fsr-sharpness 4 -- {}",
+                                       launch_session->width,
+                                       launch_session->height,
+                                       gamescope_fps,
+                                       gamescope_fps,
+                                       _app.cmd);
         }
-
-        const int gamescope_fps = std::max(1, (launch_session->fps ? launch_session->fps : 60000) / 1000);
-        // This path is only used when a client explicitly requested Gamescope.
-        // The primary session path above has already created/activated EVDI,
-        // so Gamescope is nested on the virtual display instead of replacing it.
-        launch_command = std::format("gamescope --backend=wayland -W {} -H {} -r {} -o {} -f -e -F fsr --fsr-sharpness 4 -- {}",
-                                     launch_session->width,
-                                     launch_session->height,
-                                     gamescope_fps,
-                                     gamescope_fps,
-                                     _app.cmd);
 #endif
       }
 
