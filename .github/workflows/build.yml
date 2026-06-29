@@ -55,7 +55,8 @@ jobs:
             npm \
             nodejs \
             icu \
-            numactl
+            numactl \
+            xorg-server-xvfb
 
       - name: Checkout
         uses: actions/checkout@v4
@@ -82,9 +83,10 @@ jobs:
 
       - name: Run tests
         # The suite is a single GoogleTest binary (no ctest registration);
-        # run it directly as documented in docs/contributing.md. Hardware-
-        # dependent cases self-skip via GTEST_SKIP on headless runners.
-        run: ./build/tests/test_sunshine --gtest_color=yes
+        # run it directly as documented in docs/contributing.md. Run under
+        # xvfb so platf::init() finds an X11 capture source on the headless
+        # runner (otherwise the platform-dependent suites fail their setup).
+        run: xvfb-run -a ./build/tests/test_sunshine --gtest_color=yes
 
   # ===========================================
   # Windows Build
