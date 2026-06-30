@@ -66,6 +66,24 @@ namespace stream {
     std::string_view termination_reason_str(termination_reason_e reason);
     termination_reason_e last_termination_reason();
 
+    /**
+     * @brief Aggregate reconnection/termination stats for diagnostics.
+     *
+     * Lets the UI distinguish "a client just dropped" from "the last session
+     * ended cleanly a while ago", and surface how often clients are dropping
+     * (a network-quality signal) without scraping logs.
+     */
+    struct termination_stats_t {
+      termination_reason_e last_reason {termination_reason_e::UNKNOWN};
+      /// Steady-clock ms since the last session ended; 0 if none has ended yet.
+      uint64_t ms_since_last_end {0};
+      uint64_t total_ended {0};  ///< Sessions that have ended this run.
+      uint64_t client_lost_count {0};  ///< Of those, ended by client loss (drops).
+    };
+
+    /** @brief Snapshot of the termination/reconnection stats. */
+    termination_stats_t termination_stats();
+
     std::shared_ptr<session_t> alloc(config_t &config, rtsp_stream::launch_session_t &launch_session);
     std::string uuid(const session_t& session);
     bool uuid_match(const session_t& session, const std::string_view& uuid);

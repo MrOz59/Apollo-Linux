@@ -40,6 +40,7 @@
 #include "platform/common.h"
 #include "process.h"
 #include "rtsp.h"
+#include "stream.h"
 #include "utility.h"
 #include "uuid.h"
 #include "video.h"
@@ -1652,10 +1653,23 @@ namespace confighttp {
     }
 
     const int sessions = rtsp_stream::session_count();
+    // An app still running with no active session means the host is holding it
+    // paused for a client to reconnect (resume), rather than having torn down.
+    const bool app_running = proc::proc.running() > 0;
+    const bool awaiting_reconnect = sessions == 0 && app_running;
+
+    const auto term = stream::session::termination_stats();
     runtime["sessions"] = {
       {"active", sessions},
       {"streaming", sessions > 0},
       {"last_termination", std::string(rtsp_stream::last_termination_reason())},
+      // Reconnection observability: when/why the last session ended and how
+      // often clients have been dropping, plus whether an app is parked for a
+      // reconnect right now.
+      {"awaiting_reconnect", awaiting_reconnect},
+      {"ms_since_last_end", term.ms_since_last_end},
+      {"total_ended", term.total_ended},
+      {"client_lost_count", term.client_lost_count},
     };
 
     // Live per-frame pipeline metrics (only meaningful while streaming).

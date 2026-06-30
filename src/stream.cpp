@@ -1986,6 +1986,13 @@ namespace stream {
 
     std::atomic<termination_reason_e> last_termination_reason_v {termination_reason_e::UNKNOWN};
 
+    // Reconnection/termination observability. Updated once per session-end (the
+    // first stop() that wins the reason), read by the diagnostics endpoint.
+    std::mutex termination_stats_mutex;
+    std::optional<std::chrono::steady_clock::time_point> last_termination_time_v;
+    uint64_t total_ended_v {0};
+    uint64_t client_lost_count_v {0};
+
     std::string_view termination_reason_str(termination_reason_e reason) {
       switch (reason) {
         case termination_reason_e::CLIENT_QUIT:
@@ -2010,6 +2017,21 @@ namespace stream {
       return last_termination_reason_v.load(std::memory_order_relaxed);
     }
 
+    termination_stats_t termination_stats() {
+      termination_stats_t out;
+      out.last_reason = last_termination_reason_v.load(std::memory_order_relaxed);
+      std::lock_guard lg {termination_stats_mutex};
+      if (last_termination_time_v) {
+        out.ms_since_last_end = static_cast<uint64_t>(
+          std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - *last_termination_time_v)
+            .count());
+      }
+      out.total_ended = total_ended_v;
+      out.client_lost_count = client_lost_count_v;
+      return out;
+    }
+
     void stop(session_t &session, termination_reason_e reason) {
       while_starting_do_nothing(session.state);
       auto expected = state_e::RUNNING;
@@ -2022,6 +2044,18 @@ namespace stream {
       // shutdown sweep after the client already dropped) don't overwrite it.
       session.termination_reason.store(reason, std::memory_order_relaxed);
       last_termination_reason_v.store(reason, std::memory_order_relaxed);
+
+      // Record reconnection/termination stats. Only the stop() that won the
+      // RUNNING->STOPPING transition reaches here, so each session-end is
+      // counted exactly once.
+      {
+        std::lock_guard lg {termination_stats_mutex};
+        last_termination_time_v = std::chrono::steady_clock::now();
+        ++total_ended_v;
+        if (reason == termination_reason_e::CLIENT_LOST) {
+          ++client_lost_count_v;
+        }
+      }
 
       if (reason == termination_reason_e::CLIENT_LOST) {
         BOOST_LOG(warning) << "Session ended: client ["sv << session.device_name << "] stopped responding (network loss or crash)"sv;
@@ -2046,7 +2080,19 @@ namespace stream {
         return;
       }
 
-      last_termination_reason_v.store(session.termination_reason.load(std::memory_order_relaxed), std::memory_order_relaxed);
+      const auto graceful_reason = session.termination_reason.load(std::memory_order_relaxed);
+      last_termination_reason_v.store(graceful_reason, std::memory_order_relaxed);
+
+      // Count this session-end too (graceful_stop wins its own RUNNING->STOPPING
+      // transition, so it never overlaps with the stop() accounting above).
+      {
+        std::lock_guard lg {termination_stats_mutex};
+        last_termination_time_v = std::chrono::steady_clock::now();
+        ++total_ended_v;
+        if (graceful_reason == termination_reason_e::CLIENT_LOST) {
+          ++client_lost_count_v;
+        }
+      }
 
       // reason: graceful termination
       std::uint32_t reason = 0x80030023;
