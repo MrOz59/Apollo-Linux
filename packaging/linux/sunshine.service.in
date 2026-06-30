@@ -2,9 +2,34 @@
 Description=@PROJECT_DESCRIPTION@
 StartLimitIntervalSec=500
 StartLimitBurst=5
+# Start only once the graphical session is up, and stop when it goes away.
+# Capture, the virtual display, and launched apps all need a live session.
+After=graphical-session.target
+PartOf=graphical-session.target
+Wants=graphical-session.target
 
 [Service]
-# Avoid starting Sunshine before the desktop is fully initialized.
+# Import the graphical session's environment into the systemd user manager so
+# this service (and every game/app it launches) inherits the display, Wayland
+# socket, runtime dir, audio (PipeWire/PulseAudio), and session bus. Without
+# this, a user service started at login often has none of these and capture or
+# app launch (Steam/Lutris) silently fails. The leading '-' keeps startup from
+# failing if a given variable is not set in this session type.
+ExecStartPre=-/usr/bin/systemctl --user import-environment \
+  DISPLAY \
+  WAYLAND_DISPLAY \
+  XAUTHORITY \
+  XDG_RUNTIME_DIR \
+  XDG_SESSION_TYPE \
+  XDG_SESSION_ID \
+  XDG_SESSION_CLASS \
+  XDG_SEAT \
+  XDG_CURRENT_DESKTOP \
+  DBUS_SESSION_BUS_ADDRESS \
+  PULSE_SERVER \
+  PIPEWIRE_RUNTIME_DIR
+# Give the compositor a moment to finish exporting the session environment
+# before we launch.
 ExecStartPre=/bin/sleep 5
 @SUNSHINE_SERVICE_START_COMMAND@
 @SUNSHINE_SERVICE_STOP_COMMAND@

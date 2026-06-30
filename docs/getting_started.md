@@ -396,6 +396,26 @@ systemctl --user start sunshine
 systemctl --user enable sunshine
 ```
 
+**Session environment**
+
+The service runs in your user session and inherits the graphical session
+environment (`DISPLAY`/`WAYLAND_DISPLAY`, `XDG_RUNTIME_DIR`, the audio socket,
+and the session bus). It imports these from the systemd user manager on start,
+which works on most desktops because the compositor exports them at login.
+
+If capture, audio, or launching apps (Steam/Lutris) fails when started as a
+service but works when you run `sunshine` from a terminal, your desktop is
+probably not exporting the session environment to systemd. Import it once for
+the current session and restart the service:
+
+```bash
+systemctl --user import-environment DISPLAY WAYLAND_DISPLAY XDG_RUNTIME_DIR XDG_SESSION_TYPE DBUS_SESSION_BUS_ADDRESS
+systemctl --user restart sunshine
+```
+
+To make this persistent, add the same `import-environment` line to your
+compositor's startup (e.g. an autostart script) so it runs at every login.
+
 ### macOS
 The first time you start Sunshine, you will be asked to grant access to screen recording and your microphone.
 
