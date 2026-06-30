@@ -44,6 +44,7 @@
 #include "misc.h"
 #include "src/config.h"
 #include "src/logging.h"
+#include "src/utility.h"
 #include "virtual_display.h"
 #ifdef SUNSHINE_BUILD_WAYLAND
   #include "wayland.h"
@@ -246,6 +247,7 @@ namespace VDISPLAY {
     constexpr uint64_t cap_output_identity = 1ULL << 7;
     constexpr uint64_t cap_session_owner = 1ULL << 8;
     constexpr uint64_t cap_frame_wait = 1ULL << 9;
+    constexpr uint64_t cap_metrics = 1ULL << 10;
     constexpr uint64_t cap_zero_copy_target = 1ULL << 33;
     constexpr uint64_t cap_sync_file = 1ULL << 35;
 
@@ -354,6 +356,37 @@ namespace VDISPLAY {
       uint64_t reserved[6];
     };
 
+    // Mirrors `struct drm_hermes_kms_metrics` in the driver UAPI header
+    // (include/uapi/drm/hermes_kms_drm.h). Field order and size must match
+    // exactly. Read-only counters maintained by the driver for the lifetime of
+    // the device; they are not per-session.
+    struct metrics_t {
+      uint64_t frame_sequence;
+      uint64_t frame_update_count;
+      uint64_t acquire_count;
+      uint64_t acquire_no_frame_count;
+      uint64_t dmabuf_export_count;
+      uint64_t dmabuf_export_fail_count;
+      uint64_t sync_file_export_count;
+      uint64_t sync_file_export_fail_count;
+      uint64_t wait_count;
+      uint64_t wait_ready_count;
+      uint64_t wait_timeout_count;
+      uint64_t wait_interrupted_count;
+      uint64_t output_enable_count;
+      uint64_t output_disable_count;
+      uint64_t hotplug_event_count;
+      uint64_t owner_close_disconnect_count;
+      uint64_t last_update_ns;
+      uint64_t last_acquire_ns;
+      uint64_t last_wait_start_ns;
+      uint64_t last_wait_end_ns;
+      uint64_t last_wait_duration_ns;
+      uint64_t last_dmabuf_export_ns;
+      uint64_t last_sync_file_export_ns;
+      uint64_t reserved[16];
+    };
+
     // Frame request/result flags (must match the UAPI header).
     constexpr uint64_t frame_request_dmabuf = 1ULL << 0;
     constexpr uint64_t frame_dmabuf_valid = 1ULL << 2;
@@ -367,6 +400,7 @@ namespace VDISPLAY {
     constexpr unsigned long ioctl_acquire_frame = DRM_IOWR(DRM_COMMAND_BASE + 0x04, acquire_frame_t);
     constexpr unsigned long ioctl_get_identity = DRM_IOR(DRM_COMMAND_BASE + 0x05, identity_t);
     constexpr unsigned long ioctl_wait_frame = DRM_IOWR(DRM_COMMAND_BASE + 0x06, wait_frame_t);
+    constexpr unsigned long ioctl_get_metrics = DRM_IOR(DRM_COMMAND_BASE + 0x07, metrics_t);
 
     struct device_t {
       int fd {-1};
@@ -524,6 +558,11 @@ namespace VDISPLAY {
     static bool get_status(int fd, status_t &status) {
       std::memset(&status, 0, sizeof(status));
       return ::ioctl(fd, ioctl_get_status, &status) == 0;
+    }
+
+    static bool get_metrics(int fd, metrics_t &metrics) {
+      std::memset(&metrics, 0, sizeof(metrics));
+      return ::ioctl(fd, ioctl_get_metrics, &metrics) == 0;
     }
   }  // namespace hermes_kms
 
@@ -2459,6 +2498,44 @@ namespace VDISPLAY {
       }
     }
     return -1;
+  }
+
+  HermesKmsMetrics getHermesKmsMetrics() {
+    HermesKmsMetrics out {};
+
+    hermes_kms::device_t device {};
+    if (!hermes_kms::open_device(device, false)) {
+      return out;
+    }
+    auto guard = util::fail_guard([&device]() { hermes_kms::close_device(device); });
+
+    // The driver may be present without the metrics capability (older build).
+    if (!(device.caps.flags & hermes_kms::cap_metrics)) {
+      return out;
+    }
+
+    hermes_kms::metrics_t metrics {};
+    if (!hermes_kms::get_metrics(device.fd, metrics)) {
+      BOOST_LOG(debug) << "[VDISPLAY/Hermes-KMS] GET_METRICS failed: " << std::strerror(errno);
+      return out;
+    }
+
+    out.available = true;
+    out.frame_sequence = metrics.frame_sequence;
+    out.frame_update_count = metrics.frame_update_count;
+    out.acquire_count = metrics.acquire_count;
+    out.acquire_no_frame_count = metrics.acquire_no_frame_count;
+    out.dmabuf_export_count = metrics.dmabuf_export_count;
+    out.dmabuf_export_fail_count = metrics.dmabuf_export_fail_count;
+    out.wait_count = metrics.wait_count;
+    out.wait_ready_count = metrics.wait_ready_count;
+    out.wait_timeout_count = metrics.wait_timeout_count;
+    out.output_enable_count = metrics.output_enable_count;
+    out.output_disable_count = metrics.output_disable_count;
+    out.hotplug_event_count = metrics.hotplug_event_count;
+    out.last_update_ns = metrics.last_update_ns;
+    out.last_wait_duration_ns = metrics.last_wait_duration_ns;
+    return out;
   }
 
   std::shared_ptr<EvdiBuffer> getEvdiBuffer(const std::string &display_name) {

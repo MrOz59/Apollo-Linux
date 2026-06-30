@@ -1685,6 +1685,36 @@ namespace confighttp {
       {"can_host_virtual_display", session_env.can_host_virtual_display},
     };
 
+#ifdef __linux__
+    // Hermes-KMS device counters: the zero-copy capture path's own view of how
+    // many frames were updated, acquired, exported, and waited on. Only present
+    // when the hermes_kms backend is selected and a metrics-capable device is
+    // found; null otherwise so the field's absence is unambiguous.
+    if (config::video.virtual_display_backend == "hermes_kms") {
+      const auto km = VDISPLAY::getHermesKmsMetrics();
+      if (km.available) {
+        runtime["hermes_kms"] = {
+          {"frame_sequence", km.frame_sequence},
+          {"frame_updates", km.frame_update_count},
+          {"frames_acquired", km.acquire_count},
+          {"acquires_no_frame", km.acquire_no_frame_count},
+          {"dmabuf_exports", km.dmabuf_export_count},
+          {"dmabuf_export_failures", km.dmabuf_export_fail_count},
+          {"frame_waits", km.wait_count},
+          {"frame_waits_ready", km.wait_ready_count},
+          {"frame_waits_timed_out", km.wait_timeout_count},
+          {"output_enables", km.output_enable_count},
+          {"output_disables", km.output_disable_count},
+          {"hotplug_events", km.hotplug_event_count},
+          {"last_update_ns", km.last_update_ns},
+          {"last_wait_duration_ns", km.last_wait_duration_ns},
+        };
+      } else {
+        runtime["hermes_kms"] = nullptr;
+      }
+    }
+#endif
+
     return runtime;
   }
 

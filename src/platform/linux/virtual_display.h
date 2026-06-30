@@ -75,6 +75,41 @@ namespace VDISPLAY {
   };
 
   /**
+   * @brief Device-lifetime counters read from the Hermes-KMS GET_METRICS ioctl.
+   *
+   * These are cumulative since the driver bound the device (not per-session) and
+   * are exposed by the diagnostics endpoint when the hermes_kms backend is in
+   * use. `available` is false when no Hermes-KMS device is present or the device
+   * does not advertise the metrics capability.
+   */
+  struct HermesKmsMetrics {
+    bool available = false;
+    uint64_t frame_sequence = 0;  ///< Latest frame sequence number.
+    uint64_t frame_update_count = 0;  ///< Total framebuffer updates seen.
+    uint64_t acquire_count = 0;  ///< ACQUIRE_FRAME ioctls served.
+    uint64_t acquire_no_frame_count = 0;  ///< Acquires that found no new frame.
+    uint64_t dmabuf_export_count = 0;  ///< DMA-BUFs exported to the consumer.
+    uint64_t dmabuf_export_fail_count = 0;  ///< Failed DMA-BUF exports.
+    uint64_t wait_count = 0;  ///< WAIT_FRAME ioctls served.
+    uint64_t wait_ready_count = 0;  ///< Waits that returned a ready frame.
+    uint64_t wait_timeout_count = 0;  ///< Waits that timed out.
+    uint64_t output_enable_count = 0;  ///< Times the virtual output was enabled.
+    uint64_t output_disable_count = 0;  ///< Times the virtual output was disabled.
+    uint64_t hotplug_event_count = 0;  ///< Hotplug uevents emitted.
+    uint64_t last_update_ns = 0;  ///< Timestamp of the last framebuffer update.
+    uint64_t last_wait_duration_ns = 0;  ///< Duration of the last frame wait.
+  };
+
+  /**
+   * @brief Read the Hermes-KMS device metrics, if a metrics-capable device is
+   *        present. Opens and closes its own short-lived fd, so it is safe to
+   *        call from the diagnostics endpoint regardless of session state.
+   * @return Metrics with `available=true` on success; a default (`available=false`)
+   *         value when no metrics-capable Hermes-KMS device is found.
+   */
+  HermesKmsMetrics getHermesKmsMetrics();
+
+  /**
    * @brief Initialize the virtual display driver.
    * @return DRIVER_STATUS indicating the result of initialization.
    */
