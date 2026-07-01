@@ -11,6 +11,8 @@ run `scripts/bump-version.sh <major|minor|patch>` — it moves everything under
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-07-01
+
 ### Added
 - Hermes-KMS driver diagnostics symmetric with EVDI: a `HERMES_KMS_DIAGNOSTIC`
   probe distinguishes module-not-loaded, module-not-installed, DKMS build

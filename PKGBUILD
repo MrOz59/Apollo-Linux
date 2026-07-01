@@ -2,8 +2,8 @@
 # Apollo - Game streaming server with virtual display support
 
 pkgname=apollo
-pkgver=0.1.0
-pkgrel=7
+pkgver=0.3.0
+pkgrel=1
 pkgdesc="Self-hosted game streaming server with virtual display support"
 arch=('x86_64')
 url='https://github.com/ClassicOldSong/Apollo'
