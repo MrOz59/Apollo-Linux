@@ -11,6 +11,12 @@ run `scripts/bump-version.sh <major|minor|patch>` — it moves everything under
 
 ## [Unreleased]
 
+### Changed
+- CI now gates every package build on the test suite (`build-*` jobs
+  `needs: [test]`), so nothing is compiled, released, or published as nightly
+  unless the tests pass first. Pushing a `vX.Y.Z` tag re-runs test → build →
+  release to promote a nightly into a stable, freshly built release.
+
 ## [0.3.0] - 2026-07-01
 
 ### Added

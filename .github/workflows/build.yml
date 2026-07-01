@@ -162,10 +162,14 @@ jobs:
   # Arch Linux Package (PKGBUILD)
   # ===========================================
   build-arch-pkg:
+    # Gate every package build on the test suite: nothing is compiled, and
+    # therefore nothing is ever released or published as nightly, unless the
+    # tests pass first.
+    needs: [test]
     runs-on: ubuntu-latest
     container:
       image: archlinux:latest
-    
+
     steps:
       - name: Setup Arch Linux
         run: |
@@ -253,8 +257,9 @@ jobs:
   # Debian/Ubuntu Package (.deb)
   # ===========================================
   build-deb:
+    needs: [test]
     runs-on: ubuntu-24.04
-    
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -409,10 +414,11 @@ jobs:
   # Fedora RPM Build
   # ===========================================
   build-rpm:
+    needs: [test]
     runs-on: ubuntu-latest
     container:
       image: fedora:40
-    
+
     steps:
       - name: Install Dependencies
         run: |
@@ -528,6 +534,11 @@ jobs:
   # ===========================================
   # Create Release (on tag)
   # ===========================================
+  # Promoting a nightly to a stable release is done by pushing a vX.Y.Z tag
+  # (scripts/bump-version.sh does this). The tag push re-runs the full pipeline
+  # — test -> build -> release — so a stable release is always freshly built
+  # from tested sources rather than reusing a nightly artifact. Because every
+  # build job needs [test], this release cannot publish unless the suite passed.
   release:
     if: startsWith(github.ref, 'refs/tags/v')
     needs: [build-deb, build-arch-pkg, build-rpm]
