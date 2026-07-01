@@ -202,6 +202,59 @@ namespace confighttp {
     return output;
   }
 
+  static const char *hermes_kms_diagnostic_name(VDISPLAY::HERMES_KMS_DIAGNOSTIC diagnostic) {
+    switch (diagnostic) {
+      case VDISPLAY::HERMES_KMS_DIAGNOSTIC::READY:
+        return "ready";
+      case VDISPLAY::HERMES_KMS_DIAGNOSTIC::MODULE_NOT_LOADED:
+        return "module_not_loaded";
+      case VDISPLAY::HERMES_KMS_DIAGNOSTIC::MODULE_NOT_INSTALLED:
+        return "module_not_installed";
+      case VDISPLAY::HERMES_KMS_DIAGNOSTIC::DKMS_BUILD_FAILED:
+        return "dkms_build_failed";
+      case VDISPLAY::HERMES_KMS_DIAGNOSTIC::UAPI_TOO_OLD:
+        return "uapi_too_old";
+      case VDISPLAY::HERMES_KMS_DIAGNOSTIC::MISSING_CAPABILITIES:
+        return "missing_capabilities";
+      case VDISPLAY::HERMES_KMS_DIAGNOSTIC::DEVICE_NODE_MISSING:
+        return "device_node_missing";
+    }
+
+    return "module_not_loaded";
+  }
+
+  static nlohmann::json hermes_kms_status_json() {
+    const auto status = VDISPLAY::getHermesKmsStatus();
+    nlohmann::json output {
+      {"diagnostic", hermes_kms_diagnostic_name(status.diagnostic)},
+      {"moduleLoaded", status.module_loaded},
+      {"moduleInstalled", status.module_installed},
+      {"devicePresent", status.device_present},
+      {"cardIndex", status.card_index},
+      {"uapiVersion", status.uapi_version},
+      {"requiredUapiVersion", status.required_uapi_version},
+      {"driverVersion", status.driver_version},
+      {"runningKernel", status.running_kernel},
+      {"dkmsKernels", status.dkms_kernels},
+      {"activeDisplays", nlohmann::json::array()},
+    };
+
+    for (const auto &display : status.active_displays) {
+      output["activeDisplays"].push_back({
+        {"name", display.name},
+        {"drmCardIndex", display.drm_card_index},
+        {"width", display.width},
+        {"height", display.height},
+        {"fps", display.fps},
+        {"capturePath", "hermes_kms_dmabuf"},
+        {"zeroCopyCapture", true},
+        {"hardwareEncodingAvailable", true},
+      });
+    }
+
+    return output;
+  }
+
   static nlohmann::json clipboard_status_json() {
     const bool wl_copy_available = !boost::process::v1::search_path("wl-copy").empty();
     const bool wl_paste_available = !boost::process::v1::search_path("wl-paste").empty();
@@ -1182,6 +1235,8 @@ namespace confighttp {
     output_tree["evdiSetupRequired"] = VDISPLAY::needsInitialDeviceConfiguration();
     output_tree["evdiInfo"] = evdi_status_json();
     output_tree["evdiDiagnostic"] = output_tree["evdiInfo"]["diagnostic"];
+    output_tree["hermesKmsInfo"] = hermes_kms_status_json();
+    output_tree["hermesKmsDiagnostic"] = output_tree["hermesKmsInfo"]["diagnostic"];
     output_tree["clipboardInfo"] = clipboard_status_json();
 #endif
     auto vars = config::parse_config(file_handler::read_file(config::sunshine.config_file.c_str()));
@@ -2054,6 +2109,8 @@ printf "evdi\\n" > /etc/modules-load.d/evdi.conf')EVDI";
 #ifdef __linux__
     output_tree["evdiInfo"] = evdi_status_json();
     output_tree["evdiDiagnostic"] = output_tree["evdiInfo"]["diagnostic"];
+    output_tree["hermesKmsInfo"] = hermes_kms_status_json();
+    output_tree["hermesKmsDiagnostic"] = output_tree["hermesKmsInfo"]["diagnostic"];
 #endif
     send_response(response, output_tree);
   }
@@ -2071,6 +2128,23 @@ printf "evdi\\n" > /etc/modules-load.d/evdi.conf')EVDI";
 #else
     output_tree["status"] = false;
     output_tree["error"] = "EVDI is only available on Linux.";
+#endif
+    send_response(response, output_tree);
+  }
+
+  /** Return the current Hermes-KMS driver and DKMS status for the Audio/Video UI. */
+  void getHermesKmsStatus(resp_https_t response, req_https_t request) {
+    if (!authenticate(response, request)) {
+      return;
+    }
+
+    nlohmann::json output_tree;
+#ifdef __linux__
+    output_tree["status"] = true;
+    output_tree["hermesKmsInfo"] = hermes_kms_status_json();
+#else
+    output_tree["status"] = false;
+    output_tree["error"] = "Hermes-KMS is only available on Linux.";
 #endif
     send_response(response, output_tree);
   }
@@ -2642,6 +2716,7 @@ fi')CLIP";
     server.resource["^/api/evdi/install$"]["POST"] = installEvdi;
     server.resource["^/api/evdi/install/status$"]["GET"] = getEvdiInstallStatus;
     server.resource["^/api/evdi/status$"]["GET"] = getEvdiStatus;
+    server.resource["^/api/hermes-kms/status$"]["GET"] = getHermesKmsStatus;
     server.resource["^/api/clipboard/status$"]["GET"] = getClipboardStatus;
     server.resource["^/api/clipboard/install$"]["POST"] = installClipboard;
     server.resource["^/api/hestia/v1/?$"]["GET"] = getHestiaCapabilities;

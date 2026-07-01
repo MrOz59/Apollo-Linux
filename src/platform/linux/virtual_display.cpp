@@ -533,6 +533,68 @@ namespace VDISPLAY {
       return ok;
     }
 
+    // Reason a hermes-kms card node could not be used, distinguished so the UI
+    // can offer targeted guidance. `open_device` collapses these into a bool;
+    // this walks the same probe but reports why it stopped.
+    enum class probe_result {
+      ok,
+      no_device,  ///< No card node identifies itself as the hermes-kms driver.
+      uapi_too_old,
+      missing_caps,
+    };
+
+    struct probe_t {
+      probe_result result {probe_result::no_device};
+      int card_index {-1};
+      uint32_t uapi_version {0};
+      std::string driver_version;
+    };
+
+    static probe_t probe() {
+      probe_t out;
+      std::error_code ec;
+      fs::directory_iterator dir("/dev/dri", ec);
+      if (ec) {
+        return out;
+      }
+      for (const auto &entry : dir) {
+        if (!is_card_node(entry.path())) {
+          continue;
+        }
+
+        device_t candidate {};
+        candidate.fd = ::open(entry.path().c_str(), O_RDWR | O_CLOEXEC);
+        if (candidate.fd < 0) {
+          continue;
+        }
+
+        if (::ioctl(candidate.fd, ioctl_get_version, &candidate.version) != 0 ||
+            cstr(candidate.version.driver_name) != "hermes-kms") {
+          close_device(candidate);
+          continue;
+        }
+
+        // Found the Hermes-KMS device; from here the outcome is definitive.
+        out.card_index = card_index_from_path(entry.path());
+        out.uapi_version = candidate.version.uapi_version;
+        out.driver_version = std::to_string(candidate.version.driver_major) + "." +
+                             std::to_string(candidate.version.driver_minor) + "." +
+                             std::to_string(candidate.version.driver_patch);
+
+        if (candidate.version.uapi_version < uapi_version) {
+          out.result = probe_result::uapi_too_old;
+        } else if (::ioctl(candidate.fd, ioctl_get_caps, &candidate.caps) != 0 ||
+                   !has_required_caps(candidate.caps.flags)) {
+          out.result = probe_result::missing_caps;
+        } else {
+          out.result = probe_result::ok;
+        }
+        close_device(candidate);
+        return out;
+      }
+      return out;
+    }
+
     static bool set_output(int fd, bool enabled, uint32_t width, uint32_t height, uint32_t refresh_hz, uint64_t &session_id) {
       set_output_t request {};
       request.enabled = enabled ? 1U : 0U;
@@ -1178,9 +1240,9 @@ namespace VDISPLAY {
     return uname(&system_info) == 0 ? system_info.release : "unknown";
   }
 
-  static std::vector<std::string> evdi_dkms_kernels() {
+  static std::vector<std::string> dkms_kernels(const std::string &dkms_name) {
     std::vector<std::string> kernels;
-    const fs::path dkms_root = "/var/lib/dkms/evdi";
+    const fs::path dkms_root = fs::path("/var/lib/dkms") / dkms_name;
     std::error_code ec;
     for (const auto &version : fs::directory_iterator(dkms_root, fs::directory_options::skip_permission_denied, ec)) {
       if (ec || !version.is_directory()) {
@@ -1214,6 +1276,69 @@ namespace VDISPLAY {
     count_file >> device_count;
 
     return device_count == 0 && access(add_path, W_OK) != 0;
+  }
+
+  // Generic kernel-module helpers, parameterized by module name. The EVDI
+  // helpers above predate the Hermes-KMS backend and stay specialized; these
+  // mirror their logic so the Hermes-KMS diagnostics reach the same fidelity.
+  static bool kernel_module_loaded(const std::string &module_name) {
+    std::ifstream modules("/proc/modules");
+    std::string line;
+    while (std::getline(modules, line)) {
+      // /proc/modules lines start with the module name followed by a space.
+      if (line.rfind(module_name + " ", 0) == 0) {
+        return true;
+      }
+    }
+    return fs::exists(fs::path("/sys/module") / module_name);
+  }
+
+  static bool dkms_module_installed_for_running_kernel(const std::string &module_file) {
+    utsname system_info {};
+    if (uname(&system_info) != 0) {
+      return false;
+    }
+
+    const fs::path module_root = fs::path("/lib/modules") / system_info.release;
+    constexpr std::array<const char *, 4> module_extensions {"", ".zst", ".xz", ".gz"};
+    for (const auto *extension : module_extensions) {
+      if (fs::exists(module_root / "updates/dkms" / (module_file + extension))) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  static bool dkms_build_failed(const std::string &dkms_name) {
+    const fs::path dkms_root = fs::path("/var/lib/dkms") / dkms_name;
+    std::error_code ec;
+    if (!fs::exists(dkms_root, ec)) {
+      return false;
+    }
+
+    utsname system_info {};
+    if (uname(&system_info) != 0) {
+      return false;
+    }
+
+    const std::string kernel_marker = std::string("for kernel ") + system_info.release;
+    for (fs::recursive_directory_iterator it(dkms_root, fs::directory_options::skip_permission_denied, ec), end;
+         !ec && it != end;
+         it.increment(ec)) {
+      if (it->path().filename() != "make.log") {
+        continue;
+      }
+
+      std::ifstream log_file(it->path());
+      std::string log_contents((std::istreambuf_iterator<char>(log_file)), std::istreambuf_iterator<char>());
+      if (log_contents.find(kernel_marker) != std::string::npos &&
+          log_contents.find("# exit code: 0") == std::string::npos &&
+          (log_contents.find(" error:") != std::string::npos || log_contents.find("Error ") != std::string::npos)) {
+        return true;
+      }
+    }
+
+    return false;
   }
 
   EVDI_DIAGNOSTIC getEvdiDiagnostic() {
@@ -1279,7 +1404,7 @@ namespace VDISPLAY {
       .capture_fallback_active = virtual_display_capture_fallback_active.load(),
       .library_version = evdi_library_version,
       .running_kernel = running_kernel_release(),
-      .dkms_kernels = evdi_dkms_kernels(),
+      .dkms_kernels = dkms_kernels("evdi"),
       .active_displays = {},
     };
 
@@ -1297,6 +1422,72 @@ namespace VDISPLAY {
           .height = display.height,
           .fps = display.fps / 1000,
           .frame_updates = display.evdi_buffer ? display.evdi_buffer->frame_number() : 0,
+        });
+      }
+    }
+
+    return status;
+  }
+
+  HERMES_KMS_DIAGNOSTIC getHermesKmsDiagnostic() {
+    const auto probe = hermes_kms::probe();
+    switch (probe.result) {
+      case hermes_kms::probe_result::ok:
+        return HERMES_KMS_DIAGNOSTIC::READY;
+      case hermes_kms::probe_result::uapi_too_old:
+        return HERMES_KMS_DIAGNOSTIC::UAPI_TOO_OLD;
+      case hermes_kms::probe_result::missing_caps:
+        return HERMES_KMS_DIAGNOSTIC::MISSING_CAPABILITIES;
+      case hermes_kms::probe_result::no_device:
+      default:
+        break;
+    }
+
+    // No usable hermes-kms device node. Distinguish why so the UI can point at
+    // the right fix: module not built for this kernel, a DKMS build that
+    // failed, the module simply not loaded, or a loaded module that never
+    // created a device node.
+    if (!kernel_module_loaded("hermes_kms")) {
+      if (dkms_build_failed("hermes-kms")) {
+        return HERMES_KMS_DIAGNOSTIC::DKMS_BUILD_FAILED;
+      }
+      if (!dkms_module_installed_for_running_kernel("hermes_kms.ko")) {
+        return HERMES_KMS_DIAGNOSTIC::MODULE_NOT_INSTALLED;
+      }
+      return HERMES_KMS_DIAGNOSTIC::MODULE_NOT_LOADED;
+    }
+
+    // Module is loaded but exposed no hermes-kms card node.
+    return HERMES_KMS_DIAGNOSTIC::DEVICE_NODE_MISSING;
+  }
+
+  HermesKmsStatus getHermesKmsStatus() {
+    const auto probe = hermes_kms::probe();
+    HermesKmsStatus status {
+      .diagnostic = getHermesKmsDiagnostic(),
+      .module_loaded = kernel_module_loaded("hermes_kms"),
+      .module_installed = dkms_module_installed_for_running_kernel("hermes_kms.ko"),
+      .device_present = probe.result == hermes_kms::probe_result::ok,
+      .card_index = probe.card_index,
+      .uapi_version = probe.uapi_version,
+      .required_uapi_version = hermes_kms::uapi_version,
+      .driver_version = probe.driver_version,
+      .running_kernel = running_kernel_release(),
+      .dkms_kernels = dkms_kernels("hermes-kms"),
+      .active_displays = {},
+    };
+
+    std::lock_guard<std::mutex> lock(vdisplay_mutex);
+    for (const auto &[guid, display] : virtual_displays) {
+      if (display.using_hermes_kms && display.active) {
+        status.active_displays.push_back({
+          .name = display.name,
+          .device_index = display.device_index,
+          .drm_card_index = display.drm_card_index,
+          .width = display.width,
+          .height = display.height,
+          .fps = display.fps / 1000,
+          .frame_updates = 0,  // Cumulative KMS frame metrics live in getHermesKmsMetrics().
         });
       }
     }

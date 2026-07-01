@@ -3,7 +3,7 @@
 
 pkgname=apollo
 pkgver=0.1.0
-pkgrel=5
+pkgrel=7
 pkgdesc="Self-hosted game streaming server with virtual display support"
 arch=('x86_64')
 url='https://github.com/ClassicOldSong/Apollo'

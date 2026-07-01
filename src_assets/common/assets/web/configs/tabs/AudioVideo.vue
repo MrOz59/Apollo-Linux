@@ -17,6 +17,8 @@ const props = defineProps([
   'evdiSetupRequired',
   'evdiDiagnostic',
   'evdiInfo',
+  'hermesKmsDiagnostic',
+  'hermesKmsInfo',
   'min_fps_factor',
 ])
 
@@ -36,6 +38,9 @@ const evdiInstalling = ref(false)
 const evdiDiagnostic = ref(props.evdiDiagnostic)
 const evdiInfo = ref(props.evdiInfo || {})
 const evdiInfoLoading = ref(false)
+const hermesKmsInfo = ref(props.hermesKmsInfo || {})
+const hermesKmsDiagnostic = ref(props.hermesKmsDiagnostic)
+const hermesKmsInfoLoading = ref(false)
 const clipboardInfo = ref({})
 const clipboardLoading = ref(false)
 const clipboardInstalling = ref(false)
@@ -67,6 +72,93 @@ const refreshEvdiInfo = async () => {
 const evdiState = computed(() => {
   if (props.evdiSetupRequired) return 'setup_required'
   return evdiDiagnostic.value || (props.vdisplay !== 0 ? 'module_not_loaded' : 'ready')
+})
+
+watch(() => props.hermesKmsDiagnostic, (diagnostic) => {
+  hermesKmsDiagnostic.value = diagnostic
+})
+
+watch(() => props.hermesKmsInfo, (info) => {
+  hermesKmsInfo.value = info || {}
+})
+
+const refreshHermesKmsInfo = async () => {
+  hermesKmsInfoLoading.value = true
+  try {
+    const response = await fetch('./api/hermes-kms/status', {credentials: 'include'})
+    const result = await response.json()
+    if (result.status) {
+      hermesKmsInfo.value = result.hermesKmsInfo || {}
+      hermesKmsDiagnostic.value = hermesKmsInfo.value.diagnostic || hermesKmsDiagnostic.value
+    }
+  } finally {
+    hermesKmsInfoLoading.value = false
+  }
+}
+
+const hermesKmsState = computed(() => hermesKmsDiagnostic.value || hermesKmsInfo.value.diagnostic || 'ready')
+
+// Manual, per-diagnostic install/repair guidance. Hermes-KMS ships as an
+// out-of-tree DKMS module from a separate repo, so unlike EVDI there is no
+// one-click installer: we surface the exact commands the README documents.
+const hermesKmsGuide = computed(() => {
+  const cloneAndInstall = [
+    'git clone https://github.com/MrOz59/Hermes-KMS.git',
+    'cd Hermes-KMS',
+    'sudo make dkms-install',
+    'sudo modprobe hermes_kms initial_enabled=1',
+  ]
+  switch (hermesKmsState.value) {
+    case 'dkms_build_failed':
+      return {
+        title: 'config.hermes_kms_dkms_build_failed_title',
+        description: 'config.hermes_kms_dkms_build_failed_desc',
+        steps: ['config.hermes_kms_dkms_rebuild_step', 'config.hermes_kms_restart_step'],
+        commands: ['sudo dkms autoinstall -k "$(uname -r)"', 'sudo modprobe hermes_kms initial_enabled=1'],
+      }
+    case 'module_not_installed':
+      return {
+        title: 'config.hermes_kms_module_not_installed_title',
+        description: 'config.hermes_kms_module_not_installed_desc',
+        steps: ['config.hermes_kms_install_step', 'config.hermes_kms_restart_step'],
+        commands: cloneAndInstall,
+      }
+    case 'module_not_loaded':
+      return {
+        title: 'config.hermes_kms_module_not_loaded_title',
+        description: 'config.hermes_kms_module_not_loaded_desc',
+        steps: ['config.hermes_kms_module_not_loaded_step', 'config.hermes_kms_restart_step'],
+        commands: ['sudo modprobe hermes_kms initial_enabled=1'],
+      }
+    case 'uapi_too_old':
+      return {
+        title: 'config.hermes_kms_uapi_too_old_title',
+        description: 'config.hermes_kms_uapi_too_old_desc',
+        steps: ['config.hermes_kms_update_step', 'config.hermes_kms_restart_step'],
+        commands: cloneAndInstall,
+      }
+    case 'missing_capabilities':
+      return {
+        title: 'config.hermes_kms_missing_caps_title',
+        description: 'config.hermes_kms_missing_caps_desc',
+        steps: ['config.hermes_kms_update_step', 'config.hermes_kms_restart_step'],
+        commands: cloneAndInstall,
+      }
+    case 'device_node_missing':
+      return {
+        title: 'config.hermes_kms_device_missing_title',
+        description: 'config.hermes_kms_device_missing_desc',
+        steps: ['config.hermes_kms_reload_step', 'config.hermes_kms_restart_step'],
+        commands: ['sudo modprobe -r hermes_kms', 'sudo modprobe hermes_kms initial_enabled=1'],
+      }
+    default:
+      return {
+        title: 'config.hermes_kms_install_title',
+        description: 'config.hermes_kms_install_desc',
+        steps: ['config.hermes_kms_install_step', 'config.hermes_kms_restart_step'],
+        commands: cloneAndInstall,
+      }
+  }
 })
 
 const evdiGuide = computed(() => {
@@ -225,6 +317,7 @@ const installClipboard = async () => {
 
 if (props.platform === 'linux') {
   refreshClipboardInfo()
+  refreshHermesKmsInfo()
 }
 
 const config = ref(props.config)
@@ -435,11 +528,56 @@ const validateFallbackMode = (event) => {
     </section>
 
     <section class="border-top pt-3 mt-4" v-if="platform === 'linux' && config.virtual_display_backend === 'hermes_kms'">
-      <h3 class="h6 mb-2">Hermes-KMS</h3>
-      <div class="alert alert-info small mb-0">
-        Hermes-KMS is experimental. Hermes will ask the driver to connect <code>HERMES-1</code> for the stream session and keep the owner fd open until the session ends. EVDI setup checks are bypassed for this backend.
+      <div class="d-flex align-items-center justify-content-between mb-3">
+        <h3 class="h6 mb-0">Hermes-KMS</h3>
+        <button type="button" class="btn btn-outline-secondary btn-sm" :disabled="hermesKmsInfoLoading" @click="refreshHermesKmsInfo" title="Refresh Hermes-KMS status">
+          <i class="fa-solid fa-arrows-rotate" :class="{'fa-spin': hermesKmsInfoLoading}"></i>
+        </button>
+      </div>
+      <dl class="row mb-0 small">
+        <dt class="col-sm-4">{{ $t('config.hermes_kms_status_driver') }}</dt>
+        <dd class="col-sm-8">
+          {{ hermesKmsInfo.devicePresent ? $t('config.evdi_status_present') : $t('config.evdi_status_absent') }}
+          <span v-if="hermesKmsInfo.driverVersion"> ({{ hermesKmsInfo.driverVersion }})</span>
+        </dd>
+        <dt class="col-sm-4">{{ $t('config.hermes_kms_status_module') }}</dt>
+        <dd class="col-sm-8">{{ hermesKmsInfo.moduleLoaded ? $t('config.evdi_status_loaded') : $t('config.evdi_status_not_loaded') }}<span v-if="!hermesKmsInfo.moduleLoaded && hermesKmsInfo.moduleInstalled" class="text-body-secondary"> ({{ $t('config.hermes_kms_status_installed') }})</span></dd>
+        <dt class="col-sm-4">{{ $t('config.hermes_kms_status_diagnostic') }}</dt>
+        <dd class="col-sm-8"><code>{{ hermesKmsInfo.diagnostic || 'checking' }}</code></dd>
+        <dt class="col-sm-4">{{ $t('config.hermes_kms_status_kernel') }}</dt>
+        <dd class="col-sm-8">
+          {{ hermesKmsInfo.runningKernel || '—' }}
+          <span v-if="hermesKmsInfo.dkmsKernels?.length" class="text-body-secondary"> · DKMS: {{ hermesKmsInfo.dkmsKernels.join(', ') }}</span>
+        </dd>
+      </dl>
+      <div class="mt-3">
+        <div class="small fw-semibold mb-1">{{ $t('config.evdi_status_displays') }}</div>
+        <div v-if="!hermesKmsInfo.activeDisplays?.length" class="small text-body-secondary">{{ $t('config.evdi_status_none') }}</div>
+        <ul v-else class="small mb-0 ps-3">
+          <li v-for="display in hermesKmsInfo.activeDisplays" :key="display.name">
+            {{ display.name }} — {{ display.width }}×{{ display.height }}@{{ display.fps }} (card{{ display.drmCardIndex }})
+            <span v-if="display.capturePath">, {{ display.capturePath }}</span>
+          </li>
+        </ul>
       </div>
     </section>
+
+    <div class="alert alert-warning" v-if="platform === 'linux' && config.virtual_display_backend === 'hermes_kms' && hermesKmsState !== 'ready'">
+      <div class="d-flex gap-2 align-items-center mb-2">
+        <i class="fa-solid fa-xl fa-triangle-exclamation"></i>
+        <strong>{{ $t(hermesKmsGuide.title) }}</strong>
+      </div>
+      <p class="mb-2">{{ $t(hermesKmsGuide.description) }}</p>
+      <ol class="mb-2 ps-3">
+        <li v-for="step in hermesKmsGuide.steps" :key="step">{{ $t(step) }}</li>
+      </ol>
+      <pre class="mb-2 mt-2"><code>{{ hermesKmsGuide.commands.join('\n') }}</code></pre>
+      <p class="small mb-0">{{ $t('config.hermes_kms_boot_hint') }}</p>
+    </div>
+
+    <div class="alert alert-info small" v-if="platform === 'linux' && config.virtual_display_backend === 'hermes_kms'">
+      {{ $t('config.hermes_kms_experimental_note') }}
+    </div>
 
     <section class="border-top pt-3 mt-4" v-if="platform === 'linux'">
       <div class="d-flex align-items-center justify-content-between mb-3">

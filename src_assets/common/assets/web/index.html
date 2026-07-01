@@ -113,14 +113,30 @@
         if (!this.config) return [];
         const warnings = [];
         const evdiInfo = this.config.evdiInfo || {};
+        const hermesKmsInfo = this.config.hermesKmsInfo || {};
         const clipboardInfo = this.config.clipboardInfo || {};
+        const backend = this.config.virtual_display_backend;
+        // The EVDI backend is active unless hermes_kms is explicitly selected.
+        const evdiBackendActive = this.config.platform === 'linux' && backend !== 'hermes_kms';
+        const hermesKmsBackendActive = this.config.platform === 'linux' && backend === 'hermes_kms';
 
-        if (this.config.platform === 'linux' && evdiInfo.diagnostic && evdiInfo.diagnostic !== 'ready') {
+        if (evdiBackendActive && evdiInfo.diagnostic && evdiInfo.diagnostic !== 'ready') {
           warnings.push({
             id: 'evdi-' + evdiInfo.diagnostic,
             level: 'warning',
             title: 'Virtual display is not ready',
-            message: `EVDI diagnostic: ${evdiInfo.diagnostic}. Hermes virtual-display sessions may fail until this is fixed.`,
+            message: `EVDI diagnostic: ${evdiInfo.diagnostic}. Hermes virtual-display sessions may fail until this is fixed. The Audio/Video tab has a step-by-step install guide.`,
+            href: './config#Audio/Video',
+            action: 'Open Audio/Video settings',
+          });
+        }
+
+        if (hermesKmsBackendActive && hermesKmsInfo.diagnostic && hermesKmsInfo.diagnostic !== 'ready') {
+          warnings.push({
+            id: 'hermes-kms-' + hermesKmsInfo.diagnostic,
+            level: 'warning',
+            title: 'Hermes-KMS driver is not ready',
+            message: `Hermes-KMS diagnostic: ${hermesKmsInfo.diagnostic}. Virtual-display sessions may fail until this is fixed. The Audio/Video tab has a step-by-step install guide for the Hermes-KMS driver.`,
             href: './config#Audio/Video',
             action: 'Open Audio/Video settings',
           });

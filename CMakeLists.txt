@@ -10,18 +10,18 @@ file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/VERSION" HERMES_VERSION)
 string(STRIP "${HERMES_VERSION}" HERMES_VERSION)
 
 project(Hermes VERSION ${HERMES_VERSION}
-        DESCRIPTION "Self-hosted game stream host for Artemis"
+        DESCRIPTION "Self-hosted game stream host for Hestia and Artemis"
         HOMEPAGE_URL "https://github.com/MrOz59/Hermes")
 
 set(PROJECT_LICENSE "GPL-3.0-only")
 
 set(PROJECT_FQDN "dev.lizardbyte.app.Sunshine")
 
-set(PROJECT_BRIEF_DESCRIPTION "GameStream host for Artemis")  # must be <= 35 characters
+set(PROJECT_BRIEF_DESCRIPTION "GameStream host for Hestia")  # must be <= 35 characters
 
 set(PROJECT_LONG_DESCRIPTION "Offering low latency, cloud gaming server capabilities with support for AMD, Intel, \
 and Nvidia GPUs for hardware encoding. Software encoding is also available. You can connect to Hermes from any \
-Artemis client on a variety of devices. A web UI is provided to allow configuration, and client pairing, from \
+Hestia or Artemis client on a variety of devices. A web UI is provided to allow configuration, and client pairing, from \
 your favorite web browser. Pair from the local server or any mobile device.")
 
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)

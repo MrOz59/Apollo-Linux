@@ -57,6 +57,38 @@ namespace VDISPLAY {
     uint64_t frame_updates;
   };
 
+  /**
+   * @brief Actionable Hermes-KMS state exposed to the Web UI.
+   *
+   * Mirrors EVDI_DIAGNOSTIC for the hermes_kms backend. `open_device` already
+   * distinguishes these failure modes internally; this surfaces the reason so
+   * the UI can offer the matching install/repair guidance instead of a generic
+   * "unavailable".
+   */
+  enum class HERMES_KMS_DIAGNOSTIC {
+    READY,
+    MODULE_NOT_LOADED,
+    MODULE_NOT_INSTALLED,
+    DKMS_BUILD_FAILED,
+    UAPI_TOO_OLD,
+    MISSING_CAPABILITIES,
+    DEVICE_NODE_MISSING,
+  };
+
+  struct HermesKmsStatus {
+    HERMES_KMS_DIAGNOSTIC diagnostic;
+    bool module_loaded;
+    bool module_installed;
+    bool device_present;  ///< A hermes-kms DRM card node was found and opened.
+    int card_index;  ///< DRM card index of the Hermes-KMS device, or -1.
+    uint32_t uapi_version;  ///< UAPI version reported by the device, or 0.
+    uint32_t required_uapi_version;  ///< Minimum UAPI version Hermes needs.
+    std::string driver_version;  ///< "major.minor.patch" from the device, if present.
+    std::string running_kernel;
+    std::vector<std::string> dkms_kernels;
+    std::vector<EvdiVirtualDisplayStatus> active_displays;
+  };
+
   struct EvdiStatus {
     EVDI_DIAGNOSTIC diagnostic;
     bool library_installed;
@@ -128,6 +160,12 @@ namespace VDISPLAY {
 
   /** Return runtime, DKMS, and frame-update details for the Audio/Video UI. */
   EvdiStatus getEvdiStatus();
+
+  /** Return the most specific available Hermes-KMS diagnostic for the current host. */
+  HERMES_KMS_DIAGNOSTIC getHermesKmsDiagnostic();
+
+  /** Return module, DKMS, and device details for the Audio/Video UI. */
+  HermesKmsStatus getHermesKmsStatus();
 
   /**
    * @brief Close the virtual display driver.

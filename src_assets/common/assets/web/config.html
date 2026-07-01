@@ -59,6 +59,8 @@
         :evdi-setup-required="evdiSetupRequired"
         :evdi-diagnostic="evdiDiagnostic"
         :evdi-info="evdiInfo"
+        :hermes-kms-diagnostic="hermesKmsDiagnostic"
+        :hermes-kms-info="hermesKmsInfo"
       >
       </audio-video>
 
@@ -143,6 +145,8 @@
         evdiSetupRequired: false,
         evdiDiagnostic: "",
         evdiInfo: null,
+        hermesKmsDiagnostic: "",
+        hermesKmsInfo: null,
         global_prep_cmd: [],
         global_state_cmd: [],
         server_cmd: [],
@@ -377,6 +381,12 @@
 
           this.evdiInfo = this.config.evdiInfo;
           delete this.config.evdiInfo;
+
+          this.hermesKmsDiagnostic = this.config.hermesKmsDiagnostic;
+          delete this.config.hermesKmsDiagnostic;
+
+          this.hermesKmsInfo = this.config.hermesKmsInfo;
+          delete this.config.hermesKmsInfo;
 
           this.clipboardInfo = this.config.clipboardInfo;
           delete this.config.clipboardInfo;

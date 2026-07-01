@@ -3,9 +3,10 @@
 # bump-version.sh — bump the Hermes version in one step.
 #
 # The top-level VERSION file is the single source of truth. This script
-# bumps it, mirrors the value into package.json, rolls the CHANGELOG's
-# [Unreleased] section into a dated release section, then creates a commit
-# and an annotated git tag (vX.Y.Z).
+# bumps it, mirrors the value into package.json and the PKGBUILD (pkgver,
+# resetting pkgrel to 1), rolls the CHANGELOG's [Unreleased] section into a
+# dated release section, then creates a commit and an annotated git tag
+# (vX.Y.Z).
 #
 # Usage:
 #   scripts/bump-version.sh patch        # 0.1.0 -> 0.1.1
@@ -26,6 +27,7 @@ cd "$REPO_ROOT"
 VERSION_FILE="VERSION"
 PKG_JSON="package.json"
 CHANGELOG="CHANGELOG.md"
+PKGBUILD="PKGBUILD"
 
 do_commit=1
 do_tag=1
@@ -76,7 +78,15 @@ if [[ -f "$PKG_JSON" ]]; then
   sed -i -E "0,/^([[:space:]]*\"version\":[[:space:]]*)\"[^\"]*\"/s//\1\"$new\"/" "$PKG_JSON"
 fi
 
-# 3. CHANGELOG.md — turn [Unreleased] into a dated release section and
+# 3. PKGBUILD — the Arch pkgver drives BUILD_VERSION, which the build embeds
+#    into the binary and the web UI shows. Keep it in lockstep with VERSION and
+#    reset pkgrel to 1 for the new upstream version.
+if [[ -f "$PKGBUILD" ]]; then
+  sed -i -E "0,/^pkgver=.*/s//pkgver=$new/" "$PKGBUILD"
+  sed -i -E "0,/^pkgrel=.*/s//pkgrel=1/" "$PKGBUILD"
+fi
+
+# 4. CHANGELOG.md — turn [Unreleased] into a dated release section and
 #    open a fresh [Unreleased] above it.
 if [[ -f "$CHANGELOG" ]]; then
   today="$(date +%Y-%m-%d)"
@@ -87,7 +97,7 @@ if [[ -f "$CHANGELOG" ]]; then
   fi
 fi
 
-git add "$VERSION_FILE" "$PKG_JSON" "$CHANGELOG" 2>/dev/null || true
+git add "$VERSION_FILE" "$PKG_JSON" "$PKGBUILD" "$CHANGELOG" 2>/dev/null || true
 
 if [[ "$do_commit" -eq 0 ]]; then
   echo "Files updated and staged (no commit). Done."

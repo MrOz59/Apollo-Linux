@@ -146,6 +146,18 @@ depends on:
 - `kscreen-doctor`
 - a session where the Hermes process can access the user compositor environment
 
+`evdi` is an **optional** dependency, not a build requirement: it lives in the
+AUR (not the official repos), so the package no longer lists it under `depends`
+and `makepkg -si` builds without it. Install it yourself only if you want the
+EVDI virtual-display backend:
+
+```bash
+paru -S evdi        # or: yay -S evdi
+```
+
+The Audio/Video settings tab shows a live diagnostic and step-by-step install
+guide when either virtual-display driver (EVDI or Hermes-KMS) is missing.
+
 Gamescope is not required for either virtual-display path. If installed,
 Hermes exposes an optional `Gamescope Steam Session` app entry that runs Steam
 Big Picture inside Gamescope on top of the virtual display.

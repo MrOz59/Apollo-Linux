@@ -11,6 +11,32 @@ run `scripts/bump-version.sh <major|minor|patch>` — it moves everything under
 
 ## [Unreleased]
 
+### Added
+- Hermes-KMS driver diagnostics symmetric with EVDI: a `HERMES_KMS_DIAGNOSTIC`
+  probe distinguishes module-not-loaded, module-not-installed, DKMS build
+  failure, UAPI-too-old, missing-capabilities, and device-node-missing, exposed
+  via a new `GET /api/hermes-kms/status` endpoint and the `hermesKmsInfo` block
+  in `/api/config`.
+- Manual install/repair tutorial for the Hermes-KMS backend in the Audio/Video
+  tab, with per-diagnostic steps and the exact DKMS commands.
+- Home page now surfaces driver-not-ready warnings for the selected
+  virtual-display backend (EVDI or Hermes-KMS) and points to the Audio/Video
+  install guide.
+
+### Changed
+- `scripts/bump-version.sh` now also updates the PKGBUILD `pkgver` (and resets
+  `pkgrel` to 1), keeping the version shown in the WebUI/logs in lockstep with
+  the `VERSION` file.
+
+### Fixed
+- `makepkg -si` no longer aborts on a fresh clone: `evdi` moved from a hard
+  dependency to an optional one (it is AUR-only and needed only at runtime for
+  virtual displays).
+- Desktop entry: corrected the icon reference (`apollo`, not `apollo.svg`) and
+  the launch command (`systemctl start --user`, previously the broken `--u`).
+- Application description now mentions the Hestia and Artemis clients instead of
+  only Artemis.
+
 ## [0.2.0] - 2026-06-30
 
 ### Added
