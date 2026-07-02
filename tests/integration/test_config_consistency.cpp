@@ -444,7 +444,11 @@ TEST_F(ConfigConsistencyTest, AllConfigOptionsExistInAllFiles) {
 
   // Options that are internal/special and shouldn't be in UI/docs
   const std::set<std::string, std::less<>> internalOptions = {
-    "flags"  // Internal config flags, not user-configurable
+    "flags",  // Internal config flags, not user-configurable
+    "appliance_mode"  // Dormant scaffolding: parsed but has no runtime effect
+                      // and no activation path yet, so it is intentionally not
+                      // exposed in the UI/docs. Remove from this list when the
+                      // appliance-mode activation and its UI/docs land.
   };
 
   std::vector<std::string> missingFromFiles;
