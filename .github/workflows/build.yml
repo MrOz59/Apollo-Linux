@@ -310,6 +310,18 @@ jobs:
             nodejs \
             npm
 
+      # Install the CUDA toolkit so the .deb ships NVIDIA NVENC, matching the
+      # Arch and RPM packages. Pulled from NVIDIA's Ubuntu 24.04 repo. The
+      # `cuda-toolkit-*` metapackage is the compiler toolkit only (nvcc, headers,
+      # cudart) without the driver stack, which is all the build needs.
+      - name: Install CUDA toolkit
+        run: |
+          wget -q https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb
+          sudo dpkg -i cuda-keyring_1.1-1_all.deb
+          sudo apt-get update
+          sudo apt-get install -y cuda-toolkit-12-6
+          echo "/usr/local/cuda/bin" >> "${GITHUB_PATH}"
+
       - name: Configure CMake
         run: |
           cmake -B build -G Ninja \
@@ -318,7 +330,7 @@ jobs:
             -DSUNSHINE_ENABLE_WAYLAND=ON \
             -DSUNSHINE_ENABLE_X11=ON \
             -DSUNSHINE_ENABLE_DRM=ON \
-            -DSUNSHINE_ENABLE_CUDA=OFF
+            -DCUDA_FAIL_ON_MISSING=ON
 
       - name: Build
         run: cmake --build build --config ${{env.BUILD_TYPE}} -j$(nproc)
@@ -453,8 +465,30 @@ jobs:
             libicu-devel \
             numactl-devel \
             rpm-build \
+            wget \
             nodejs \
             npm
+
+      # Install the CUDA toolkit so the .rpm ships NVIDIA NVENC, matching the
+      # Arch and DEB packages. NVIDIA has no Fedora 40 repo yet; the fedora39
+      # packages work on 40. nvcc 12.6 rejects Fedora 40's default GCC 14, so
+      # install gcc13-c++ and point nvcc at it via NVCC_PREPEND_FLAGS.
+      - name: Install CUDA toolkit
+        run: |
+          dnf install -y dnf-plugins-core gcc13-c++
+          dnf config-manager --add-repo https://developer.download.nvidia.com/compute/cuda/repos/fedora39/x86_64/cuda-fedora39.repo
+          dnf install -y cuda-toolkit-12-6
+          echo "/usr/local/cuda/bin" >> "${GITHUB_PATH}"
+          # nvcc 12.6 rejects Fedora 40's default GCC 14; point it at the gcc13
+          # compat compiler. Resolve the binary name rather than assuming it,
+          # since Fedora's versioned g++ naming varies.
+          gxx13="$(command -v g++-13 || command -v g++13 || true)"
+          if [ -z "$gxx13" ]; then
+            echo "gcc13 c++ compiler not found after install" >&2
+            exit 1
+          fi
+          echo "Using host compiler for nvcc: $gxx13"
+          echo "NVCC_PREPEND_FLAGS=-ccbin $gxx13" >> "${GITHUB_ENV}"
 
       - name: Checkout
         uses: actions/checkout@v4
@@ -473,7 +507,7 @@ jobs:
             -DSUNSHINE_ENABLE_WAYLAND=ON \
             -DSUNSHINE_ENABLE_X11=ON \
             -DSUNSHINE_ENABLE_DRM=ON \
-            -DSUNSHINE_ENABLE_CUDA=OFF
+            -DCUDA_FAIL_ON_MISSING=ON
 
       - name: Build
         run: cmake --build build -j$(nproc)
