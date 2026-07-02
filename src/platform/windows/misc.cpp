@@ -1878,6 +1878,14 @@ namespace platf {
     // Gamescope / virtual-display session routing is Linux-only.
     return {};
   }
+
+  appliance_readiness_t
+  appliance_readiness() {
+    // Appliance mode (headless/Gamescope boot-to-stream) is Linux-only.
+    appliance_readiness_t out;
+    out.diagnostic = "unsupported";
+    return out;
+  }
 }  // namespace platf
 
 static std::string ensureCrLf(const std::string& utf8Str) {

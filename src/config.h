@@ -265,6 +265,12 @@ namespace config {
     bool enable_pairing;
     bool enable_discovery;
     bool envvar_compatibility_mode;
+    /// Appliance mode: run as a dedicated streaming appliance (auto-login into a
+    /// headless/Gamescope session that boots straight into streaming). This is
+    /// dormant scaffolding — the flag is parsed and readiness is reported via
+    /// diagnostics, but no boot/login orchestration is performed yet. Off by
+    /// default; enabling it currently has no runtime effect.
+    bool appliance_mode;
     std::string locale;
     int min_log_level;
     std::bitset<flag::FLAG_SIZE> flags;

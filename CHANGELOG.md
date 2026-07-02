@@ -11,6 +11,15 @@ run `scripts/bump-version.sh <major|minor|patch>` — it moves everything under
 
 ## [Unreleased]
 
+### Added
+- Appliance-mode groundwork (dormant): an `appliance_mode` config flag (off by
+  default) and a read-only `platf::appliance_readiness()` that reports whether
+  the host could boot straight into a headless/Gamescope streaming session
+  (Gamescope availability, virtual-display availability, autologin detection,
+  session environment). Surfaced under `appliance` in the diagnostics runtime
+  view. No boot/login orchestration exists yet and enabling the flag has no
+  runtime effect — this only paves the way for a future activation path.
+
 ### Changed
 - CI now gates every package build on the test suite (`build-*` jobs
   `needs: [test]`), so nothing is compiled, released, or published as nightly

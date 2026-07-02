@@ -931,4 +931,34 @@ namespace platf {
   session_environment_t
   detect_session_environment();
 
+  /**
+   * @brief Read-only assessment of whether the host could run as a dedicated
+   *        streaming appliance (boot straight into a headless/Gamescope session).
+   *
+   * This is dormant scaffolding for a future appliance mode: it inspects the
+   * prerequisites but performs no boot/login orchestration and changes no
+   * runtime behavior. The result is surfaced in diagnostics so the groundwork
+   * can be validated before any activation path exists.
+   */
+  struct appliance_readiness_t {
+    bool enabled {false};  ///< config `appliance_mode` flag state.
+    bool gamescope_available {false};  ///< A Gamescope compositor/session is present.
+    bool virtual_display_available {false};  ///< An EVDI or Hermes-KMS virtual display is usable.
+    bool headless_capable {false};  ///< Can present without a physical monitor (virtual display present).
+    bool autologin_configured {false};  ///< A display-manager autologin drop-in was detected.
+    std::string session_environment;  ///< `session_environment_t::describe()` value.
+
+    /// Aggregate diagnostic for the UI: "disabled" when the flag is off,
+    /// "ready" when the prerequisites are met, otherwise the first missing one.
+    std::string diagnostic;
+  };
+
+  /**
+   * @brief Assess appliance-mode readiness without changing any state.
+   * @return Readiness details. On non-Linux platforms all fields are false and
+   *         the diagnostic is "unsupported".
+   */
+  appliance_readiness_t
+  appliance_readiness();
+
 }  // namespace platf

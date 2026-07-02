@@ -1754,6 +1754,20 @@ namespace confighttp {
       {"can_host_virtual_display", session_env.can_host_virtual_display},
     };
 
+    // Appliance-mode readiness (dormant): reports whether the host could boot
+    // straight into a headless/Gamescope streaming session. Detection only —
+    // no boot/login orchestration exists yet, and the flag is off by default.
+    const auto appliance = platf::appliance_readiness();
+    runtime["appliance"] = {
+      {"enabled", appliance.enabled},
+      {"diagnostic", appliance.diagnostic},
+      {"gamescope_available", appliance.gamescope_available},
+      {"virtual_display_available", appliance.virtual_display_available},
+      {"headless_capable", appliance.headless_capable},
+      {"autologin_configured", appliance.autologin_configured},
+      {"session_environment", appliance.session_environment},
+    };
+
 #ifdef __linux__
     // Hermes-KMS device counters: the zero-copy capture path's own view of how
     // many frames were updated, acquired, exported, and waited on. Only present

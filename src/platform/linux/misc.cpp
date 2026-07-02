@@ -1258,4 +1258,81 @@ std::string get_local_ip_for_gateway() {
 
     return env;
   }
+
+  // Detect, read-only, whether a display-manager autologin drop-in exists. This
+  // only inspects well-known config locations; it never enables autologin.
+  static bool detect_autologin() {
+    std::error_code ec;
+
+    // getty autologin override (used for tty/Gamescope-session appliance setups).
+    for (const char *path : {"/etc/systemd/system/getty@tty1.service.d/autologin.conf",
+                             "/etc/systemd/system/getty@tty1.service.d/override.conf"}) {
+      if (fs::exists(path, ec)) {
+        std::ifstream in(path);
+        std::string contents((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        if (contents.find("--autologin") != std::string::npos || contents.find("autologin") != std::string::npos) {
+          return true;
+        }
+      }
+    }
+
+    // Display-manager autologin: SDDM and LightDM keep it in their config trees.
+    for (const char *path : {"/etc/sddm.conf", "/etc/lightdm/lightdm.conf"}) {
+      if (fs::exists(path, ec)) {
+        std::ifstream in(path);
+        std::string contents((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        if (contents.find("Autologin") != std::string::npos || contents.find("autologin-user") != std::string::npos) {
+          return true;
+        }
+      }
+    }
+    for (const char *dir : {"/etc/sddm.conf.d", "/etc/lightdm/lightdm.conf.d"}) {
+      if (!fs::exists(dir, ec)) {
+        continue;
+      }
+      for (fs::directory_iterator it(dir, fs::directory_options::skip_permission_denied, ec), end; !ec && it != end; it.increment(ec)) {
+        std::ifstream in(it->path());
+        std::string contents((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        if (contents.find("Autologin") != std::string::npos || contents.find("autologin-user") != std::string::npos) {
+          return true;
+        }
+      }
+    }
+
+    return false;
+  }
+
+  appliance_readiness_t appliance_readiness() {
+    appliance_readiness_t out;
+    out.enabled = config::sunshine.appliance_mode;
+
+    const auto env = detect_session_environment();
+    out.session_environment = env.describe();
+    out.gamescope_available = env.gamescope_running || env.kind == session_environment_e::gamescope_session;
+
+    // A virtual display makes the host headless-capable: it can present without
+    // a physical monitor attached. Reuse the existing driver readiness checks.
+    const bool evdi_ready = VDISPLAY::getEvdiDiagnostic() == VDISPLAY::EVDI_DIAGNOSTIC::READY;
+    const bool kms_ready = VDISPLAY::getHermesKmsDiagnostic() == VDISPLAY::HERMES_KMS_DIAGNOSTIC::READY;
+    out.virtual_display_available = evdi_ready || kms_ready;
+    out.headless_capable = out.virtual_display_available;
+
+    out.autologin_configured = detect_autologin();
+
+    // Aggregate diagnostic. The flag being off is reported first because the
+    // whole feature is dormant; when enabled, report the first missing piece.
+    if (!out.enabled) {
+      out.diagnostic = "disabled";
+    } else if (!out.virtual_display_available) {
+      out.diagnostic = "no_virtual_display";
+    } else if (!out.gamescope_available) {
+      out.diagnostic = "no_gamescope";
+    } else if (!out.autologin_configured) {
+      out.diagnostic = "no_autologin";
+    } else {
+      out.diagnostic = "ready";
+    }
+
+    return out;
+  }
 }  // namespace platf

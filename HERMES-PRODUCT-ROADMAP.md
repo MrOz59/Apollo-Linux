@@ -67,7 +67,11 @@ Legend: `[x]` done · `[~]` partially done · `[ ]` not started.
 
 - [ ] Simplify setup flow.
 - [ ] Pairing flow.
-- [ ] Appliance mode.
+- [~] Appliance mode. Dormant backend groundwork landed: an `appliance_mode`
+  config flag (off) and a read-only `platf::appliance_readiness()` that reports
+  Gamescope/virtual-display/autologin/session readiness under `appliance` in the
+  diagnostics runtime view. No boot/login orchestration yet; the activation path
+  (autologin → Gamescope → virtual display → hermes) is the remaining work.
 - [ ] Resolution / bitrate configuration.
 - [ ] Web UI redesign (beyond the metrics work).
 
